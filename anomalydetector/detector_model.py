@@ -11,15 +11,16 @@ from spcqe.quantiles import SmoothPeriodicQuantiles
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+from matplotlib.colors import Normalize
 import warnings
 import joblib
 import os
 import pandas as pd
 import scipy.stats as stats
-from matplotlib.colors import Normalize
 from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, accuracy_score
 
@@ -31,22 +32,53 @@ from sklearn.metrics import f1_score, accuracy_score
 from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
 from sklearn.ensemble import VotingClassifier
 from xgboost import XGBClassifier
 
 
+opt_n_default = 57
 svm_model = SVC(kernel='rbf')
-xgboost_model = XGBClassifier(n_estimators=100, learning_rate=0.1, random_state=42)
+xgboost_model = XGBClassifier(
+    objective="binary:logistic",
+    eval_metric="logloss",
+    max_depth=10,
+    learning_rate=0.05,      
+    n_estimators=100,       
+    early_stopping_rounds=10,
+    use_label_encoder=False  
+)
 lda_model = LinearDiscriminantAnalysis()
 logreg_model = LogisticRegression(max_iter=1000)
 qda_model = QuadraticDiscriminantAnalysis()
-ensemble_model =  VotingClassifier(
-            estimators=[
-                ('xgb', xgboost_model),
-                ('svm', svm_model),
-                ('logreg', logreg_model)
-            ],voting='soft')
+
+xgboost_ensemble = XGBClassifier(n_estimators=100, learning_rate=0.1, random_state=42)
+svm_ensemble = SVC(probability=True)  
+pca_qda = Pipeline([
+('pca', PCA(n_components=opt_n_default)), 
+('qda', QuadraticDiscriminantAnalysis())
+])
+pca_logreg = Pipeline([
+('pca', PCA(n_components=opt_n_default)),
+('logreg', LogisticRegression())
+])
+pca_lda = Pipeline([
+('pca', PCA(n_components=opt_n_default)),
+('lda', LinearDiscriminantAnalysis())
+])
+ensemble_model = VotingClassifier(
+    estimators=[
+        ('xgb', xgboost_ensemble),
+        ('svm', svm_ensemble),
+        ('PCAlogreg', pca_logreg),
+        ('PCA_QDA', pca_qda)
+    ],
+    voting='soft'
+)
+
+
+# =================================================================================================
+# ===============================   OUTAGEPIPELINE CLASS   ========================================
+# =================================================================================================
 
 
 class OutagePipeline:
@@ -116,6 +148,14 @@ class OutagePipeline:
                 self.residual_model = qda_model
             if model_residuals == 'LDA' :
                 self.residual_model = lda_model
+            if model_residuals == 'PCA+LDA' :
+                self.residual_model = pca_lda
+            if model_residuals == 'PCA+QDA' :
+                self.residual_model = pca_qda
+            if model_residuals == 'PCA+logisticRegression' :
+                self.residual_model = pca_logreg
+            else :
+                self.residual_model = None
         else :
             self.residual_model = model_residuals
         self.train_size = train_size
@@ -505,70 +545,195 @@ class OutagePipeline:
         coeffs = np.dot(c, theta_reshaped.T)
         return coeffs
 
-    def display_quantiles(self, site=None, num_day=7, idx=0, print_train = True):
+    def display_quantiles(self, site=None, num_day=7, idx=0, print_train = True,figure = 'all'):
         if site is None:
             site = self.target
-        fig, axes = plt.subplots(1, 2, figsize=(18, 5))
+        if figure == 'all':
+            fig = plt.figure(figsize=(18, 10))
+            gs  = GridSpec(2, 2, height_ratios=[1, 0.8], figure=fig)
 
-        cmap1 = plt.get_cmap('coolwarm')
-        fq = self.spqs[site].fit_quantiles[idx*self.ndil:(idx+num_day)*self.ndil, :]
-        colors1 = cmap1(np.linspace(0, 1, fq.shape[1]))
+            # axe du haut sur toute la largeur
+            ax_quant = fig.add_subplot(gs[0, :])
+            # deux axes en bas
+            ax_qq    = fig.add_subplot(gs[1, 0])
+            ax_pp    = fig.add_subplot(gs[1, 1])
 
-        for j in range(fq.shape[1]):
-            axes[0].plot(fq[:, j], color=colors1[j], alpha=0.5, label=self.quantiles[j])
+            # =======================
+            #  Quantile functions
+            # =======================
+            cmap1 = plt.get_cmap('coolwarm')
+            fq = self.spqs[site].fit_quantiles[idx * self.ndil:(idx + num_day) * self.ndil, :]
+            colors1 = cmap1(np.linspace(0, 1, fq.shape[1]))
 
+            for j in range(fq.shape[1]):
+                ax_quant.plot(fq[:, j], color=colors1[j], alpha=0.5, label=self.quantiles[j])
 
-        xticks_pos = np.arange(0, fq.shape[0], self.ndil)
+            xticks_pos = np.arange(0, fq.shape[0], self.ndil)
+            start_date = pd.to_datetime(self.start_train) + pd.to_timedelta(idx, unit="D")
+            xticks_labels = [
+                (start_date + pd.Timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range(num_day)
+            ]
+            ax_quant.set_xticks(xticks_pos)
+            ax_quant.set_xticklabels(xticks_labels, rotation=45)
+            ax_quant.set_title("Quantile functions")
+            ax_quant.legend()
 
-        start_date = pd.to_datetime(self.start_train) + pd.to_timedelta(idx, unit="D")
-        xticks_labels = [(start_date + pd.Timedelta(days=i)).strftime("%Y-%m-%d") for i in range(num_day)]
+            # =======================
+            #  QQ plot
+            # =======================
+            raw = self.quantile_train[site] if print_train else self.quantile_test[site]
+            data = raw.T.flatten()
 
-        axes[0].set_xticks(xticks_pos)
-        axes[0].set_xticklabels(xticks_labels, rotation=45)
-        axes[0].set_title("Quantile functions")
-        axes[0].legend()
+            osm, _ = stats.probplot(data, dist="norm")
+            idxs = np.arange(len(data))
+            cmap2 = plt.get_cmap('plasma')
+            norm = Normalize(vmin=0, vmax=self.ndil - 1)
+            colors = cmap2(norm(idxs % self.ndil))
 
-        if print_train :
-            raw = self.quantile_train[site]  
-        else :
-            raw = self.quantile_test[site]           
-        data = raw.T.flatten()                       
+            ax_qq.scatter(osm[0], osm[1], c=colors, alpha=0.7, s=12)
+            sm = plt.cm.ScalarMappable(cmap=cmap2, norm=norm)
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax_qq)
+            cbar.set_label(f"Index within time window (0 → {self.ndil - 1})")
 
-        osm, _ = stats.probplot(data, dist="norm")
-        idxs = np.arange(len(data))
-        cmap2 = plt.get_cmap('plasma')  
-        norm = Normalize(vmin=0, vmax=self.ndil - 1)
-        colors = cmap2(norm(idxs % self.ndil))
+            min_val = min(osm[0].min(), osm[1].min())
+            max_val = max(osm[0].max(), osm[1].max())
+            ax_qq.plot([min_val, max_val], [min_val, max_val], 'r--', lw=1)
+            ax_qq.axhline(y=-4, color='grey', linestyle='--', linewidth=1)
+            ax_qq.axhline(y=4,  color='grey', linestyle='--', linewidth=1)
+            ax_qq.set_xlabel("Theoretical Quantiles")
+            ax_qq.set_ylabel("Experimental Quantiles")
+            ax_qq.set_title("QQ-plot of transformed data")
 
+            # =======================
+            #  PP plot
+            # =======================
+            data_sorted = np.sort(data)
+            emp_cdf = np.arange(1, len(data_sorted) + 1) / (len(data_sorted) + 1)
+            th_cdf = stats.norm.cdf(data_sorted)
+            idxs2 = np.arange(len(data_sorted))
+            colors_pp = cmap2(norm(idxs2 % self.ndil))
 
-        axes[1].scatter(osm[0], osm[1], c=colors, alpha=0.7, s=12)
+            ax_pp.scatter(th_cdf, emp_cdf, c=colors_pp, alpha=0.7, s=12)
+            sm2 = plt.cm.ScalarMappable(cmap=cmap2, norm=norm)
+            sm2.set_array([])
+            cbar2 = plt.colorbar(sm2, ax=ax_pp)
+            cbar2.set_label(f"Index within time window (0 → {self.ndil - 1})")
+            ax_pp.plot([0, 1], [0, 1], 'r--', lw=1)
+            ax_pp.set_xlabel("Theoretical CDF")
+            ax_pp.set_ylabel("Empirical CDF")
+            ax_pp.set_title("PP-plot of transformed data")
 
-        sm = plt.cm.ScalarMappable(cmap=cmap2, norm=norm)
-        sm.set_array([])
-        cbar = plt.colorbar(sm, ax=axes[1])
-        cbar.set_label(f"Index within time window (0 → {self.ndil - 1})")
+            plt.tight_layout()
+            plt.show()
+        if figure == 'quantile functions':
+            fig, ax = plt.subplots(figsize=(8, 4)) 
 
+            cmap1 = plt.get_cmap('coolwarm')
+            fq = self.spqs[site].fit_quantiles[idx * self.ndil:(idx + num_day) * self.ndil, :]
+            colors1 = cmap1(np.linspace(0, 1, fq.shape[1]))
 
-        min_val = min(osm[0].min(), osm[1].min())
-        max_val = max(osm[0].max(), osm[1].max())
-        axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', lw=1)
+            for j in range(fq.shape[1]):
+                ax.plot(fq[:, j], color=colors1[j], alpha=0.5, label=self.quantiles[j])
 
-        axes[1].set_title("QQ-plot of transformed data")
-        axes[1].legend()
+            xticks_pos = np.arange(0, fq.shape[0], self.ndil)
+            start_date = pd.to_datetime(self.start_train) + pd.to_timedelta(idx, unit="D")
+            xticks_labels = [
+                (start_date + pd.Timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range(num_day)
+            ]
 
-        plt.tight_layout()
-        plt.show()
+            ax.set_xticks(xticks_pos)
+            ax.set_xticklabels(xticks_labels, rotation=45)
+            ax.set_title("Quantile functions")
+            ax.legend()
+
+            plt.tight_layout()
+            plt.show()
+        if figure == 'QQ-plot':
+            if print_train:
+                raw = self.quantile_train[site]
+            else:
+                raw = self.quantile_test[site]
+
+            data = raw.T.flatten()
+
+            osm, _ = stats.probplot(data, dist="norm")
+            idxs = np.arange(len(data))
+
+            cmap2 = plt.get_cmap('plasma')
+            norm = Normalize(vmin=0, vmax=self.ndil - 1)
+            colors = cmap2(norm(idxs % self.ndil))
+
+            fig, ax = plt.subplots(figsize=(7, 4.5)) 
+
+            ax.scatter(osm[0], osm[1], c=colors, alpha=0.7, s=12)
+
+            sm = plt.cm.ScalarMappable(cmap=cmap2, norm=norm)
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax)
+            cbar.set_label(f"Index within time window (0 → {self.ndil - 1})")
+
+            min_val = min(osm[0].min(), osm[1].min())
+            max_val = max(osm[0].max(), osm[1].max())
+            ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=1)
+            ax.axhline(y=-4, color='grey', linestyle='--', linewidth=1)
+            ax.axhline(y=4,  color='grey', linestyle='--', linewidth=1)
+
+            ax.set_xlabel("Theoretical Quantiles")
+            ax.set_ylabel("Experimental Quantiles")
+            ax.set_title("QQ-plot of transformed data")
+
+            plt.tight_layout()
+            plt.show()
+        if figure == 'PP-plot':
+            if print_train:
+                raw = self.quantile_train[site]
+            else:
+                raw = self.quantile_test[site]
+
+            data = raw.T.flatten()
+
+            data_sorted = np.sort(data)
+            empirical_cdf = np.arange(1, len(data_sorted) + 1) / (len(data_sorted) + 1)
+
+            theoretical_cdf = stats.norm.cdf(data_sorted)
+
+            idxs = np.arange(len(data_sorted))
+            cmap = plt.get_cmap('plasma')
+            norm = Normalize(vmin=0, vmax=self.ndil - 1)
+            colors = cmap(norm(idxs % self.ndil))
+
+            fig, ax = plt.subplots(figsize=(7, 4.5))
+
+            ax.scatter(theoretical_cdf, empirical_cdf, c=colors, alpha=0.7, s=12)
+
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax)
+            cbar.set_label(f"Index within time window (0 → {self.ndil - 1})")
+
+            ax.plot([0, 1], [0, 1], 'r--', lw=1)
+
+            ax.set_xlabel("Theoretical CDF")
+            ax.set_ylabel("Empirical CDF")
+            ax.set_title("PP-plot of transformed data")
+
+            plt.tight_layout()
+            plt.show()
+
 
 
 def save(file, obj): 
     """
-    Save a QLinear object to a file using joblib with gzip compression.
+    Save a OutagePipeline object to a file using joblib with gzip compression.
     
     Parameters:
     -----------
     file : str or file-like object
         The file path where the object should be saved.
-    obj : QLinear object
+    obj : OutagePipeline object
         The object to be saved.
     """
     # Ensure the directory exists
