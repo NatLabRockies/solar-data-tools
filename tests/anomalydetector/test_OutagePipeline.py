@@ -51,7 +51,8 @@ class TestOutagePipeline(unittest.TestCase):
         model = OutagePipeline([self.target],
                 dhs.ndil(),
                 target=self.target,
-                solver_quantiles='mosek')
+                quantiles=np.array([0.05, 0.5,0.95]),
+                solver_quantiles='clarabel')
         model.fit_quantiles(dhs)
         actual_output = model.quantile_train[self.target]
         np.testing.assert_array_almost_equal(actual_output,expected_output,4)

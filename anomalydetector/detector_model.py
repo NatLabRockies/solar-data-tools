@@ -6,7 +6,7 @@ from anomalydetector.utils import (
                     reshape_for_cheb,
                     make_cheb_basis,
                     optimal_weighted_regression,
-                    fit_dask)
+                    )
 from spcqe.quantiles import SmoothPeriodicQuantiles
 
 import numpy as np
@@ -183,7 +183,6 @@ class OutagePipeline:
                       quantiles = None,
                       solver_quantiles = None,
                       num_harmonics = None,
-                      client = None,
                       ):
         """
         This function fits the first part of the model and compute the intermediate results for the training set
@@ -237,19 +236,6 @@ class OutagePipeline:
             extrapolate='solar'
             )
         self.spqs = dict_quantile
-
-        if client is not None :
-            full_array_dict = {}
-            for key in multidata.keys :
-                full_array,_ = full_signal(multidata.common_days,self.start_train,multidata.dil_mat[key],self.ndil)
-                full_array_dict[key] = full_array
-            futures_spqs = {key : client.scatter(self.spqs[key],hash=False) for key in self.spqs}
-            tasks = [fit_dask(futures_spqs[key],full_array_dict[key]) for key in multidata.keys]
-            futures = client.compute(tasks)
-            client.gather(futures)
-            for key in multidata.keys :
-                self.spqs[key] = futures_spqs[key].result()
-
 
         self.quantile_train = {}
         for key in multidata.dil_mat :

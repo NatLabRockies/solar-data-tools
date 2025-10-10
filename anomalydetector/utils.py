@@ -5,7 +5,6 @@ import numpy as np
 from datetime import datetime
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
-from dask import delayed
 
 
 def divide_df(data_frame,datetime_col = None):
@@ -46,9 +45,6 @@ def common_days(dh_dict):
         )
     return result
 
-@delayed
-def fit_dask(spq,x):
-    spq.fit(x)
 
 def full_signal(day_list,start_day,signal,ndil):
     """
