@@ -33,8 +33,10 @@ from sklearn.svm import SVC
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import VotingClassifier
-from xgboost import XGBClassifier
-
+try :
+    from xgboost import XGBClassifier
+except :
+    warnings.warn("xgboost is not installed. Some features may be unavailable.")
 
 opt_n_default = 57
 svm_model = SVC(kernel='rbf')
