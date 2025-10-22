@@ -240,10 +240,10 @@ class OutagePipeline:
             raise ValueError('No target given')
         
         self.start_train = multidata.common_days[0]
-        if weight_quantiles is not None : self.weight_quantiles = weight_quantiles
-        if quantiles is not None : self.quantiles = quantiles
-        if solver_quantiles is not None : self.solver_quantiles = solver_quantiles
-        if num_harmonics is not None : self.num_harmonics = num_harmonics
+        self.weight_quantiles = weight_quantiles if weight_quantiles is not None else self.weight_quantiles
+        self.quantiles = quantiles if quantiles is not None else self.quantiles
+        self.solver_quantiles = solver_quantiles if solver_quantiles is not None else self.solver_quantiles 
+        self.num_harmonics = num_harmonics if num_harmonics is not None else self.num_harmonics 
 
         dict_quantile = {}
         for site in self.sites :
