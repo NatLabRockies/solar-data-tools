@@ -293,11 +293,11 @@ class OutagePipeline:
         y[np.isnan(y)] = 0
         y_failure[np.isnan(y_failure)] = 0
 
-        if nlag is not None : self.nlag = nlag
-        if num_basis is not None : self.num_basis = num_basis
-        if weight_linear is not None : self.weight_linear = weight_linear
-        if lambda_range is not None : self.lambda_range = lambda_range
-        if num_split is not None : self.num_split = num_split
+        self.nlag = nlag if nlag is not None else self.nlag
+        self.num_basis = num_basis if num_basis is not None else self.num_basis
+        self.weight_linear = weight_linear if weight_linear is not None else self.weight_linear
+        self.lambda_range = lambda_range if lambda_range is not None else self.lambda_range 
+        self.num_split = num_split if num_split is not None else self.num_split
 
         X,y,y_failure = form_xy(X,y,y_failure,self.nlag)
         X_flat,y_flat = reshape_for_cheb(X,y,self.num_basis)
@@ -319,8 +319,8 @@ class OutagePipeline:
         :param param: Dictionnary of every possible parameters for the learning step: model_residuals, train_size.
         :type param: dict
         """
-        if residual_model is not None : self.residual_model = residual_model
-        if train_size is not None : self.train_size = train_size
+        self.residual_model = residual_model if residual_model is not None else self.residual_model 
+        self.train_size = train_size if train_size is not None else self.train_size 
         X = np.concat([self.residuals_train,self.residuals_failure])
         y = np.concat([[0]*self.residuals_train.shape[0],[1]*self.residuals_failure.shape[0]])
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=1-self.train_size, shuffle=True,random_state=0)
