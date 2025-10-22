@@ -18,64 +18,9 @@ import joblib
 import os
 import pandas as pd
 import scipy.stats as stats
-from sklearn.decomposition import PCA
-from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, accuracy_score
-
-
-# =================================================================================================
-# ======================================   SKLEARN MODEL   ========================================
-# =================================================================================================
-
-from sklearn.svm import SVC
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import VotingClassifier
-try :
-    from xgboost import XGBClassifier
-except :
-    warnings.warn("xgboost is not installed. Some features may be unavailable.")
-
-opt_n_default = 57
-svm_model = SVC(kernel='rbf')
-xgboost_model = XGBClassifier(
-    objective="binary:logistic",
-    eval_metric="logloss",
-    max_depth=10,
-    learning_rate=0.05,      
-    n_estimators=100,       
-    early_stopping_rounds=10,
-    use_label_encoder=False  
-)
-lda_model = LinearDiscriminantAnalysis()
-logreg_model = LogisticRegression(max_iter=1000)
-qda_model = QuadraticDiscriminantAnalysis()
-
-xgboost_ensemble = XGBClassifier(n_estimators=100, learning_rate=0.1, random_state=42)
-svm_ensemble = SVC(probability=True)  
-pca_qda = Pipeline([
-('pca', PCA(n_components=opt_n_default)), 
-('qda', QuadraticDiscriminantAnalysis())
-])
-pca_logreg = Pipeline([
-('pca', PCA(n_components=opt_n_default)),
-('logreg', LogisticRegression())
-])
-pca_lda = Pipeline([
-('pca', PCA(n_components=opt_n_default)),
-('lda', LinearDiscriminantAnalysis())
-])
-ensemble_model = VotingClassifier(
-    estimators=[
-        ('xgb', xgboost_ensemble),
-        ('svm', svm_ensemble),
-        ('PCAlogreg', pca_logreg),
-        ('PCA_QDA', pca_qda)
-    ],
-    voting='soft'
-)
 
 
 # =================================================================================================
@@ -138,23 +83,99 @@ class OutagePipeline:
         
 
         if isinstance(model_residuals,str) :
+            opt_n_default = 57
             if model_residuals == "SVM":
+                from sklearn.svm import SVC
+                svm_model = SVC(kernel='rbf')
                 self.residual_model = svm_model
             if model_residuals == 'ensemble':
-                self.residual_model = ensemble_model
+                try : 
+                    from sklearn.svm import SVC
+                    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
+                    from sklearn.linear_model import LogisticRegression
+                    from sklearn.ensemble import VotingClassifier
+                    from xgboost import XGBClassifier
+                    from sklearn.decomposition import PCA
+                    from sklearn.pipeline import Pipeline
+                except ModuleNotFoundError:
+                    warnings.warn("xgboost is not installed. Some features may be unavailable.")
+                    self.residual_model = None
+                else :
+                    xgboost_ensemble = XGBClassifier(n_estimators=100, learning_rate=0.1, random_state=42)
+                    svm_ensemble = SVC(probability=True)  
+                    pca_qda = Pipeline([
+                    ('pca', PCA(n_components=opt_n_default)), 
+                    ('qda', QuadraticDiscriminantAnalysis())
+                    ])
+                    pca_logreg = Pipeline([
+                    ('pca', PCA(n_components=opt_n_default)),
+                    ('logreg', LogisticRegression())
+                    ])
+                    ensemble_model = VotingClassifier(
+                        estimators=[
+                            ('xgb', xgboost_ensemble),
+                            ('svm', svm_ensemble),
+                            ('PCAlogreg', pca_logreg),
+                            ('PCA_QDA', pca_qda)
+                        ],
+                        voting='soft'
+                    )
+                    self.residual_model = ensemble_model
             if model_residuals == 'logisticRegression':
+                from sklearn.linear_model import LogisticRegression
+                logreg_model = LogisticRegression(max_iter=1000)
                 self.residual_model = logreg_model
             if model_residuals == 'XGBoost' :
-                self.residual_model = xgboost_model
+                try :
+                    from xgboost import XGBClassifier
+                except ModuleNotFoundError:
+                    warnings.warn("xgboost is not installed. Some features may be unavailable.")
+                    self.residual_model = None
+                else :
+                    xgboost_model = XGBClassifier(
+                                    objective="binary:logistic",
+                                    eval_metric="logloss",
+                                    max_depth=10,
+                                    learning_rate=0.05,      
+                                    n_estimators=100,       
+                                    early_stopping_rounds=10,
+                                    use_label_encoder=False  
+                                )
+                    self.residual_model = xgboost_model
             if model_residuals == 'QDA' :
+                from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+                qda_model = QuadraticDiscriminantAnalysis()
                 self.residual_model = qda_model
             if model_residuals == 'LDA' :
+                from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+                lda_model = LinearDiscriminantAnalysis()
                 self.residual_model = lda_model
             if model_residuals == 'PCA+LDA' :
+                from sklearn.decomposition import PCA
+                from sklearn.pipeline import Pipeline
+                from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+                pca_lda = Pipeline([
+                    ('pca', PCA(n_components=opt_n_default)),
+                    ('lda', LinearDiscriminantAnalysis())
+                    ])
                 self.residual_model = pca_lda
             if model_residuals == 'PCA+QDA' :
+                from sklearn.decomposition import PCA
+                from sklearn.pipeline import Pipeline
+                from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+                pca_lda = Pipeline([
+                    ('pca', PCA(n_components=opt_n_default)),
+                    ('qda', QuadraticDiscriminantAnalysis())
+                    ])
                 self.residual_model = pca_qda
             if model_residuals == 'PCA+logisticRegression' :
+                from sklearn.decomposition import PCA
+                from sklearn.pipeline import Pipeline
+                from sklearn.linear_model import LogisticRegression
+                pca_lda = Pipeline([
+                    ('pca', PCA(n_components=opt_n_default)),
+                    ('qda', LogisticRegression())
+                    ])
                 self.residual_model = pca_logreg
             else :
                 self.residual_model = None

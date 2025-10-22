@@ -52,7 +52,8 @@ class TestOutagePipeline(unittest.TestCase):
                 dhs.ndil(),
                 target=self.target,
                 quantiles=np.array([0.05, 0.5,0.95]),
-                solver_quantiles='clarabel')
+                solver_quantiles='clarabel',
+                model_residuals='SVM')
         model.fit_quantiles(dhs)
         actual_output = model.quantile_train[self.target]
         np.testing.assert_array_almost_equal(actual_output,expected_output,4)
@@ -72,7 +73,8 @@ class TestOutagePipeline(unittest.TestCase):
         model = OutagePipeline(self.sites,
                 101,
                 target=self.target,
-                solver_quantiles='mosek')
+                solver_quantiles='clarabel',
+                model_residuals='SVM')
         model.quantile_train = {}
         #reconstruct the OutagePipeline object 
         for site in self.sites :
