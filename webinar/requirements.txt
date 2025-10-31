@@ -1,0 +1,3 @@
+solar-data-tools
+folium
+marimo

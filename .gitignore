@@ -19,6 +19,7 @@ notebooks/*.pkl
 notebooks/data/*
 docs/source/getting_started/notebooks/inputs
 
+
 ### Database ###
 *.accdb
 *.db
@@ -323,3 +324,6 @@ tags
 
 # End of https://www.toptal.com/developers/gitignore/api/vim
 /sdt_dask/results
+
+### Webinar files
+!webinar/assets/
