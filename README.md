@@ -282,3 +282,12 @@ We use [Semantic Versioning](http://semver.org/) for versioning. For the version
 * **Bennet Meyers** - *Initial work and Main research work* - [Bennet Meyers GitHub](https://github.com/bmeyers)
 
 See also the list of [contributors](https://github.com/bmeyers/solar-data-tools/contributors) who participated in this project.
+
+## Copyright Notice
+
+COPYRIGHT © 2019, Bennet Meyers, Alliance for Sustainable Energy, LLC and SLAC National Accelerator Laboratory. All rights reserved. This work is supported in part by the U.S. Department of Energy, Office of Basic Energy Sciences under contract DE-AC02-76SF00515.
+All rights reserved.
+
+## Usage Restrictions
+
+Neither the name of the Leland Stanford Junior University, SLAC National Accelerator Laboratory, U.S. Department of Energy nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
