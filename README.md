@@ -285,8 +285,7 @@ See also the list of [contributors](https://github.com/bmeyers/solar-data-tools/
 
 ## Copyright Notice
 
-COPYRIGHT © 2019, Bennet Meyers, Alliance for Sustainable Energy, LLC and SLAC National Accelerator Laboratory. All rights reserved. This work is supported in part by the U.S. Department of Energy, Office of Basic Energy Sciences under contract DE-AC02-76SF00515.
-All rights reserved.
+COPYRIGHT © 2025 Alliance for Sustainable Energy, LLC and SLAC National Accelerator Laboratory. All rights reserved. This work is supported in part by the U.S. Department of Energy, Office of Basic Energy Sciences under contract DE-AC02-76SF00515.
 
 ## Usage Restrictions
 
