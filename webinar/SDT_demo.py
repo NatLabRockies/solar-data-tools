@@ -1,3 +1,4 @@
+# ruff: noqa: E722
 import marimo
 
 __generated_with = "0.15.2"
@@ -196,7 +197,7 @@ def _(folium):
     folium.Marker(
         location=[lat, lon], popup="<b>Site 2107 “Farm Solar Array (CA)”</b>"
     ).add_to(m)
-    folium.LayerControl().add_to(m);
+    folium.LayerControl().add_to(m)
     return lat, lon, m
 
 

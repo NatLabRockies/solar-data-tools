@@ -103,7 +103,7 @@ html_theme_options = {
     "navbar_align": "left",
     "navbar_end": ["theme-switcher", "navbar-icon-links"],
     "show_version_warning_banner": True,
-    "github_url": "https://github.com/slacgismo/solar-data-tools",
+    "github_url": "https://github.com/NREL/solar-data-tools",
     "show_toc_level": 1,
     "footer_start": ["copyright", "sphinx-version"],
     "navigation_with_keys": False,

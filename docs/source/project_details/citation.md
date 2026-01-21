@@ -12,7 +12,7 @@ If you use Solar Data Tools in your research, please cite:
   Nimish Telang, Nimish Yadav, Elpiniki Apostolaki-Iosifidou, Claire Berschauer, Chengcheng Ding,
   Jonathan Goncalves, Victor-Haoyang Lian, Tristan Lin, Alejandro Londono-Hurtado, Junlin Luo, Xiao Ming,
   David Jose Florez Rodriguez, Derin Serbetcioglu, Shixian Sheng, Jose St Louis, Tadatoshi Takahashi, and Haoxi Zhang. (2024).
-  slacgismo/solar-data-tools. Zenodo. doi: [10.5281/zenodo.5056959](https://zenodo.org/doi/10.5281/zenodo.5056959)
+  NREL/solar-data-tools. Zenodo. doi: [10.5281/zenodo.5056959](https://zenodo.org/doi/10.5281/zenodo.5056959)
 
 ## Citing technical details (_e.g._, SDT algorithms)
 

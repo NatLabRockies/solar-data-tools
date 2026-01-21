@@ -6,7 +6,7 @@ Contributions are welcome, and are greatly appreciated! Even small contributions
 
 ### Report Bugs
 
-To report a bug, first make sure there isn't already an open [GitHub Issue](https://github.com/slacgismo/solar-data-tools/issues)
+To report a bug, first make sure there isn't already an open [GitHub Issue](https://github.com/NREL/solar-data-tools/issues)
 about it. If not, you can submit a new issue, making sure to include:
 
 * Your OS name and version.
@@ -17,12 +17,12 @@ about it. If not, you can submit a new issue, making sure to include:
 
 ### Fix Open Issues
 
-Look through the [GitHub Issues](https://github.com/slacgismo/solar-data-tools/issues) for any
+Look through the [GitHub Issues](https://github.com/NREL/solar-data-tools/issues) for any
 reported bugs. Anything tagged with "bug" and "help wanted" is open to contributions.
 
 ### Implement Features
 
-Look through the [GitHub Issues](https://github.com/slacgismo/solar-data-tools/issues) for any
+Look through the [GitHub Issues](https://github.com/NREL/solar-data-tools/issues) for any
 feature requests. Anything tagged with "enhancement" and "help  wanted" is open to contributions.
 
 ### Write Documentation
@@ -36,7 +36,7 @@ Ready to contribute? Here's how to set up Solar Data Tools for local development
 
 1. You will need to have `git` installed on your local machine, and you will need some way to create and manage
 Python virtual environments. We recommend using `conda`.
-2. Create your own fork of the Solar Data Tools [repository](https://github.com/slacgismo/solar-data-tools).
+2. Create your own fork of the Solar Data Tools [repository](https://github.com/NREL/solar-data-tools).
 3. Clone your repository, for example by typing in your terminal:
 `git clone https://github.com/<your_username>/solar-data-tools.git`.
 4. Install `solardatatools` as editable in your new environment:

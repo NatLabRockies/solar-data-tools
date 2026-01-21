@@ -10,4 +10,4 @@ For code and documentation contributions, our :doc:`../../index_dev` will help y
 to submitting a pull request. We are still in the process of developing our guidelines, so if anything is unclear, or if you'd like more clarity on
 some parts of the documentation, please consider submitting a `GitHub Issue`_!
 
-.. _GitHub Issue: https://github.com/slacgismo/solar-data-tools/issues
+.. _GitHub Issue: https://github.com/NREL/solar-data-tools/issues

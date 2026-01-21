@@ -77,7 +77,7 @@ dask = [
     ]
 
 [project.urls]
-Homepage = "https://github.com/slacgismo/solar-data-tools"
+Homepage = "https://github.com/NREL/solar-data-tools"
 Documentation = "https://solar-data-tools.readthedocs.io/"
-"Bug Tracker" = "https://github.com/slacgismo/solar-data-tools/issues"
-Discussions = "https://github.com/slacgismo/solar-data-tools/discussions"
+"Bug Tracker" = "https://github.com/NREL/solar-data-tools/issues"
+Discussions = "https://github.com/NREL/solar-data-tools/discussions"
