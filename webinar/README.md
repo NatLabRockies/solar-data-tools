@@ -28,4 +28,3 @@ marimo run SDT_demo.py
 ## Warning
 
 In the live webinar, I use MOSEK to speed up the statistical clear sky fitting module. For this publicly hosted version, we're assuming people don't have MOSEK, so this has been turned off. So, that step will take ~8 minutes to complete, rather than the ~45 seconds seen in the live demo.
-
