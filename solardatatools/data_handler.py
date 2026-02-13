@@ -2509,7 +2509,7 @@ time zone errors     {report["time zone correction"] != 0}
             valid_matrix = dilated_matrix[:, valid_days_mask]  # shape: (101, N')
 
             # Create 365-day vector for day-of-year (1–365, excluding Feb 29)
-            doy = valid_day_index.dayofyear.to_numpy()
+            doy = np.copy(valid_day_index.dayofyear.to_numpy())
             doy[doy > 59] -= 1  # adjust for removed Feb 29
 
             # Aggregate using nanmedian for robustness to missing data
