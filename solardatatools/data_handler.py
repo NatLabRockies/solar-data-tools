@@ -240,6 +240,7 @@ class DataHandler:
         solar_noon_estimator="srss",
         correct_tz=True,
         extra_cols=None,
+        sunrise_sunset_random_seed=42,
         daytime_threshold=0.005,
         units="W",
         solver="CLARABEL",
@@ -438,7 +439,12 @@ class DataHandler:
             progress.update()
         ss = SunriseSunset()
         try:
-            ss.run_optimizer(self.raw_data_matrix, plot=False, solver=solver_convex)
+            ss.run_optimizer(
+                self.raw_data_matrix,
+                random_seed=sunrise_sunset_random_seed,
+                plot=False,
+                solver=solver_convex,
+            )
             self.boolean_masks.daytime = ss.sunup_mask_estimated
         except Exception:
             msg = "Sunrise/sunset detection failed."
