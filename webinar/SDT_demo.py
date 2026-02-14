@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.15.2"
+__generated_with = "0.19.11"
 app = marimo.App(width="columns", layout_file="layouts/SDT_demo.slides.json")
 
 
@@ -139,7 +139,7 @@ def _(dh, heatmap_labels, mo, plt, zoom_level):
             plt.xlim(_c - 365 * 0.25, _c + 356 * 0.25)
         elif zoom_level.value == 5:
             plt.xlim(_c - 365 * 0.125, _c + 356 * 0.125)
-    except:
+    except AttributeError:
         heatmap = mo.md("Run pipeline to view plot")
     return (heatmap,)
 
@@ -159,7 +159,7 @@ def _(dh):
     try:
         cap_change_plot = dh.plot_capacity_change_analysis(figsize=(8, 3.5))
         cap_change_plot.axes[0].set_ylim(19, 31)
-    except:
+    except AttributeError:
         cap_change_plot = None
     return (cap_change_plot,)
 
@@ -170,7 +170,7 @@ def _(dh, plt):
         inverter_clip_plot = dh.plot_clipping(figsize=(8, 4))
         plt.tight_layout()
         # inverter_clip_plot.axes[0].set_ylim(19, 31)
-    except:
+    except AttributeError:
         inverter_clip_plot = None
     return (inverter_clip_plot,)
 
@@ -183,7 +183,7 @@ def _(dh, plt):
         )
         plt.tight_layout()
         # inverter_clip_plot.axes[0].set_ylim(19, 31)
-    except:
+    except AttributeError:
         inverter_clip_plot2 = None
     return (inverter_clip_plot2,)
 
@@ -196,7 +196,7 @@ def _(folium):
     folium.Marker(
         location=[lat, lon], popup="<b>Site 2107 “Farm Solar Array (CA)”</b>"
     ).add_to(m)
-    folium.LayerControl().add_to(m);
+    folium.LayerControl().add_to(m)
     return lat, lon, m
 
 
@@ -204,7 +204,7 @@ def _(folium):
 def _(dh):
     try:
         circ_dist = dh.plot_circ_dist(flag="clear")
-    except:
+    except AttributeError:
         circ_dist = None
     return (circ_dist,)
 
@@ -213,7 +213,7 @@ def _(dh):
 def _(dh_lfa):
     try:
         lfa_plot = dh_lfa.loss_analysis.plot_decomposition(figsize=(12, 10))
-    except:
+    except NameError:
         lfa_plot = None
     return (lfa_plot,)
 
@@ -222,7 +222,7 @@ def _(dh_lfa):
 def _(dh_lfa):
     try:
         loss_waterfall = dh_lfa.loss_analysis.plot_waterfall()
-    except:
+    except NameError:
         loss_waterfall = None
     return (loss_waterfall,)
 
@@ -231,7 +231,7 @@ def _(dh_lfa):
 def _(dh_lfa):
     try:
         loss_pie = dh_lfa.loss_analysis.plot_pie()
-    except:
+    except NameError:
         loss_pie = None
     return (loss_pie,)
 
@@ -274,7 +274,7 @@ def _(dh, lat_lon_sldrs, plt):
             lat=lat_lon_sldrs.value["lat"], lon=lat_lon_sldrs.value["lon"], tz_offset=-8
         )
         polar_plot = plt.gcf()
-    except:
+    except AttributeError:
         polar_plot = None
     return (polar_plot,)
 
@@ -284,7 +284,7 @@ def _(dh):
     try:
         dh.setup_location_and_orientation_estimation(-8)
         tilt, az = dh.estimate_orientation()
-    except:
+    except AttributeError:
         tilt, az = None, None
     return az, tilt
 
@@ -308,7 +308,7 @@ def _(dh, mo):
             full_width=True,
             show_value=True,
         )
-    except:
+    except AttributeError:
         start_day_slider = mo.ui.slider(0, 1)
         num_day_slider = mo.ui.slider(0, 1)
     return num_day_slider, start_day_slider
@@ -326,7 +326,7 @@ def _(dh, plt):
         daily_energy_plot = dh.plot_daily_energy()
         plt.ylabel("Energy (kWh)")
         daily_energy_sig = dh.daily_signals.energy
-    except:
+    except AttributeError:
         daily_energy_plot = None
         daily_energy_sig = None
     return daily_energy_plot, daily_energy_sig
@@ -354,7 +354,7 @@ def _(dh, num_day_slider, plt, show_clipped_times, start_day_slider):
             )
             plt.legend(loc=4)
         plt.xticks(rotation=45)
-    except:
+    except AttributeError:
         ts_plot = None
     return (ts_plot,)
 
@@ -379,7 +379,7 @@ def _(azim_sldr, dh, elev_sldr, plt, roll_sldr):
         bundt_plot = dh.plot_bundt()
         _ax = plt.gca()
         _ax.view_init(elev=elev_sldr.value, azim=azim_sldr.value, roll=roll_sldr.value)
-    except:
+    except AttributeError:
         bundt_plot = None
     return (bundt_plot,)
 
@@ -415,7 +415,7 @@ def _(dh, mo):
             full_width=True,
             show_value=True,
         )
-    except:
+    except AttributeError:
         start_day_slider2 = mo.ui.slider(0, 1)
         num_day_slider2 = mo.ui.slider(0, 1)
     return num_day_slider2, start_day_slider2
@@ -425,7 +425,7 @@ def _(dh, mo):
 def _(dh_cs):
     try:
         dh_cs.detect_clear_sky()
-    except:
+    except NameError:
         pass
     return
 
@@ -459,7 +459,9 @@ def _(dh_cs, num_day_slider2, plt, show_clear_times, start_day_slider2):
             )
         plt.legend(loc=4)
         plt.xticks(rotation=45)
-    except:
+    except NameError:
+        ts_plot2 = None
+    except AttributeError:
         ts_plot2 = None
     return (ts_plot2,)
 
@@ -474,11 +476,15 @@ def _(dh, dh_cs, mo, plot_2d, plt):
             figsize=(8 * 1.25, 3 * 1.25),
         )
         plt.title("Estimated clear sky power")
-    except:
+    except NameError:
+        cs_heatmap = None
+    except AttributeError:
         cs_heatmap = None
     try:
         heatmap2 = dh.plot_heatmap("raw", figsize=(8 * 1.25, 3 * 1.25))
-    except:
+    except NameError:
+        heatmap2 = mo.md("Run pipeline to view plot")
+    except AttributeError:
         heatmap2 = mo.md("Run pipeline to view plot")
     return cs_heatmap, heatmap2
 
@@ -505,7 +511,7 @@ def _(azim_sldr2, dh, elev_sldr2, plt, roll_sldr2):
         _ax.view_init(
             elev=elev_sldr2.value, azim=azim_sldr2.value, roll=roll_sldr2.value
         )
-    except:
+    except AttributeError:
         bundt_plot2 = None
     return (bundt_plot2,)
 
@@ -518,15 +524,16 @@ def _(azim_sldr2, dh_cs, elev_sldr2, plt, roll_sldr2):
         _ax.view_init(
             elev=elev_sldr2.value, azim=azim_sldr2.value, roll=roll_sldr2.value
         )
-    except:
+    except NameError:
+        bundt_q = None
+    except AttributeError:
         bundt_q = None
     return (bundt_q,)
 
 
 @app.cell(column=1, hide_code=True)
 def _(mo):
-    mo.md(
-        f"""
+    mo.md(f"""
     <h1 style="text-align: center;line-height:1;">Solar Data Tools Live Tutorial</h1>
     <h3 style="text-align: center;line-height:1;">September 25, 2025</h3>
     <h3 style="text-align: center;line-height:1;">Bennet Meyers, PhD</h3>
@@ -537,18 +544,17 @@ def _(mo):
     {mo.image(src="assets/SDT_v1_secondary_blue_text.png", width="20vw").center()}
 
     {
-            mo.hstack(
-                [
-                    mo.image(src="assets/nrel-blue-logo.png", width="8vw"),
-                    mo.image(src="assets/SLAC_primary_red.png", width="10vw"),
-                    mo.image(src="assets/SUSig_StnfrdOnly_red2.png", width="8vw"),
-                ],
-                justify="center",
-                gap=3,
-            )
-        }
-    """
-    )
+        mo.hstack(
+            [
+                mo.image(src="assets/nrel-blue-logo.png", width="8vw"),
+                mo.image(src="assets/SLAC_primary_red.png", width="10vw"),
+                mo.image(src="assets/SUSig_StnfrdOnly_red2.png", width="8vw"),
+            ],
+            justify="center",
+            gap=3,
+        )
+    }
+    """)
     return
 
 
@@ -682,7 +688,9 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    _title = mo.md("## What can solar data tools do for you?")
+    _title = mo.md("""
+    ## What can solar data tools do for you?
+    """)
     # elevator pitch
     return
 
@@ -855,7 +863,7 @@ def _(dh, mo):
     with mo.redirect_stdout():
         try:
             dh.report()
-        except:
+        except AttributeError:
             pass
     _text2 = """
     ```
@@ -866,7 +874,7 @@ def _(dh, mo):
     mo.output.append(mo.md(_text2))
     try:
         mo.output.append(dh.report(return_values=True))
-    except:
+    except AttributeError:
         pass
     return
 
@@ -1240,12 +1248,10 @@ def _(loss_pie, loss_waterfall, mo):
 
 @app.cell
 def _(mo):
-    _t = mo.md(
-        """
+    _t = mo.md("""
     solve with clarabel: 8:21
     solve with mosek: 0:43
-    """
-    )
+    """)
     return
 
 
