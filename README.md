@@ -9,7 +9,7 @@
     <br />
     <a href="https://solar-data-tools.readthedocs.io/"><strong>Explore our documentation </strong></a>
     ·
-    <a href="https://github.com/NREL/solar-data-tools/issues"><strong>Report Issue </strong></a>
+    <a href="https://github.com/NatLabRockies/solar-data-tools/issues"><strong>Report Issue </strong></a>
     <br />
     <br />
 </p>
@@ -69,7 +69,7 @@
 <tr>
   <td>License</td>
   <td>
-    <a href="https://github.com/NREL/solar-data-tools/blob/main/LICENSE">
+    <a href="https://github.com/NatLabRockies/solar-data-tools/blob/main/LICENSE">
         <img src="https://img.shields.io/pypi/l/solar-data-tools.svg" alt="license" />
     </a>
 </td>
@@ -80,11 +80,11 @@
     <a href="https://solar-data-tools.readthedocs.io/">
         <img src="https://readthedocs.org/projects/solar-data-tools/badge/?version=stable" alt="documentation build status" />
     </a>
-        <a href="https://github.com/NREL/solar-data-tools/actions/workflows/test.yml">
-        <img src="https://github.com/NREL/solar-data-tools/actions/workflows/test.yml/badge.svg?branch=main" alt="Actions build status" />
+        <a href="https://github.com/NatLabRockies/solar-data-tools/actions/workflows/test.yml">
+        <img src="https://github.com/NatLabRockies/solar-data-tools/actions/workflows/test.yml/badge.svg?branch=main" alt="Actions build status" />
     </a>
-    <a href="https://github.com/NREL/solar-data-tools/actions/workflows/build.yml">
-        <img src="https://github.com/NREL/solar-data-tools/actions/workflows/build.yml/badge.svg">
+    <a href="https://github.com/NatLabRockies/solar-data-tools/actions/workflows/build.yml">
+        <img src="https://github.com/NatLabRockies/solar-data-tools/actions/workflows/build.yml/badge.svg">
     </a>
   </td>
 </tr>
@@ -130,7 +130,7 @@ they only have access to the most basic data stream—power output of the system
 Solar Data Tools provides methods for data I/O, cleaning, filtering, plotting, and analysis. These methods are largely automated and require little
 to no input from the user regardless of system type—from utility tracking systems to multi-pitch rooftop systems.
 Head over to our Getting Started pages in our [documentation](https://solar-data-tools.readthedocs.io/) for a demo! For an in-depth tutorial on Solar Data Tools, we recommend taking a look at the recent webinar
-we did with the DOE's Solar Energy Technologies Office (SETO) with our colleagues at NREL, linked below:
+we did with the DOE's Solar Energy Technologies Office (SETO) with our colleagues at NatLabRockies, linked below:
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=XKbqIlAEwOQ">
@@ -140,7 +140,7 @@ we did with the DOE's Solar Energy Technologies Office (SETO) with our colleague
   </img>
 </p>
 
-You can also check the [notebooks](https://github.com/NREL/solar-data-tools/blob/main/notebooks/examples) folder in this repo for more examples.
+You can also check the [notebooks](https://github.com/NatLabRockies/solar-data-tools/blob/main/notebooks/examples) folder in this repo for more examples.
 
 This work is supported by the U.S. Department of Energy’s Office of Energy Efficiency and Renewable Energy (EERE) under the Solar Energy Technologies Office Award Number 38529.
 
@@ -275,7 +275,7 @@ Solar Data Tools that you used. Solar Data Tools DOIs are listed at
 
 ## Versioning
 
-We use [Semantic Versioning](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/NREL/solar-data-tools/tags).
+We use [Semantic Versioning](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/NatLabRockies/solar-data-tools/tags).
 
 ## Authors
 
