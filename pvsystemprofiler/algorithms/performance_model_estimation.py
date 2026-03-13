@@ -35,7 +35,10 @@ def find_fit_costheta(data_matrix, clear_index, doy):
     constraints.append(cvx.diff(x2, k=1) == z)
     phi3 = 1e3 * cvx.sum_squares(cvx.diff(x3, k=2)) + 1e-6 * cvx.norm1(x3)
     for val in set(solstice_centered_index(doy)):
-        constraints.append(cvx.diff(x3[solstice_centered_index(doy) == val]) == 0)
+        try:
+            constraints.append(cvx.diff(x3[solstice_centered_index(doy) == val]) == 0)
+        except ValueError:
+            pass
     constraints.append(x3 <= 0)
     phi4 = 1e3 * cvx.sum_squares(cvx.diff(x4, k=2)) + 1e-3 * cvx.sum_squares(x4)
     constraints.append(x4[:-365] == x4[365:])
