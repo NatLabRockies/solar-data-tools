@@ -53,7 +53,7 @@ dynamic = ["version"]
 version_file = "solardatatools/_version.py"
 
 [tool.setuptools.packages.find]
-include = ["solardatatools*", "pvsystemprofiler*", "sdt_dask*"]
+include = ["solardatatools*", "pvsystemprofiler*", "sdt_dask*","anomalydetector*"]
 
 [project.optional-dependencies]
 docs = [
@@ -77,7 +77,7 @@ dask = [
     ]
 
 [project.urls]
-Homepage = "https://github.com/NREL/solar-data-tools"
+Homepage = "https://github.com/NatLabRockies/solar-data-tools"
 Documentation = "https://solar-data-tools.readthedocs.io/"
-"Bug Tracker" = "https://github.com/NREL/solar-data-tools/issues"
-Discussions = "https://github.com/NREL/solar-data-tools/discussions"
+"Bug Tracker" = "https://github.com/NatLabRockies/solar-data-tools/issues"
+Discussions = "https://github.com/NatLabRockies/solar-data-tools/discussions"
