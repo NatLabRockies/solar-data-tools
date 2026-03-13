@@ -1247,7 +1247,7 @@ time zone errors     {report["time zone correction"] != 0}
             self.data_clearness_score = None
         return
 
-    def clipping_check(self, solver="OSQP"):
+    def clipping_check(self, solver="CLARABEL"):
         if self.clipping_analysis is None:
             self.clipping_analysis = ClippingDetection()
         self.clipping_analysis.check_clipping(
