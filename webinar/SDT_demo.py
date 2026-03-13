@@ -1,3 +1,4 @@
+# ruff: noqa: E722
 import marimo
 
 __generated_with = "0.19.11"
