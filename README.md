@@ -129,12 +129,13 @@ they only have access to the most basic data stream—power output of the system
 
 Solar Data Tools provides methods for data I/O, cleaning, filtering, plotting, and analysis. These methods are largely automated and require little
 to no input from the user regardless of system type—from utility tracking systems to multi-pitch rooftop systems.
-Head over to our Getting Started pages in our [documentation](https://solar-data-tools.readthedocs.io/) for a demo! For an in-depth tutorial on Solar Data Tools, we recommend taking a look at the recent webinar
-we did with the DOE's Solar Energy Technologies Office (SETO) with our colleagues at NatLabRockies, linked below:
+Head over to our Getting Started pages in our [documentation](https://solar-data-tools.readthedocs.io/) for a demo!
+
+As of April 2026, we have a **new webinar** posted to YouTube! Check it out here:
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=XKbqIlAEwOQ">
- <img src="https://img.youtube.com/vi/XKbqIlAEwOQ/hq1.jpg" />
+  <a href="https://www.youtube.com/watch?v=---j2QyczQ0">
+ <img src="https://img.youtube.com/vi/---j2QyczQ0/hq1.jpg" />
   </a>
   <br/>
   </img>
