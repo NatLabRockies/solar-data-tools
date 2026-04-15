@@ -37,6 +37,8 @@ $ open _build/html/index.html
 
 ## Changes merged to main auto update on [solar-data-tools docs](https://solar-data-tool.readthedocs.io/en/latest/) via a web hook
 
+See read-the-docs builds here: https://app.readthedocs.org/projects/solar-data-tools/
+
 
 ## Link for [getting started with sphinx](https://docs.readthedocs.io/en/stable/intro/getting-started-with-sphinx.html)
 
