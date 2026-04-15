@@ -27,7 +27,8 @@ Solar Data Tools provides methods for data I/O, cleaning, filtering, plotting, a
 These methods are largely automated and require little to no input from the user regardless of system type—from utility
 tracking systems to multi-pitch rooftop systems. Get started `here <index_getting_started.md>`_ with installation and basic tutorials!
 
-Has of April 2026, we have published a `new webinar <https://youtu.be/---j2QyczQ0?si=OPxmuLNjd6xGkvz4>`__, first hosted in September 2025! We also have an older 2024 `webinar <https://www.youtube.com/watch?reload=9&v=XKbqIlAEwOQ>`_ we did
+As of April 2026, we have published a `new webinar <https://youtu.be/---j2QyczQ0?si=OPxmuLNjd6xGkvz4>`__, first hosted in September 2025! We also
+have an older 2024 `webinar <https://www.youtube.com/watch?reload=9&v=XKbqIlAEwOQ>`_ we did
 with the DOE's Solar Energy Technologies Office (SETO), where we discuss the motivation behind
 the development of Solar Data Tools and demonstrate its capabilities.
 
