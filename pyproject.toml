@@ -62,7 +62,8 @@ docs = [
     "sphinx_design",
     "nbsphinx",
     "myst-parser",
-    "nbsphinx_link"
+    "nbsphinx_link",
+    "docutils<0.22"
 ]
 mosek = [
     "mosek"
