@@ -8,7 +8,7 @@ description = "Tools for performing common tasks on solar PV data signals"
 readme = "README.md"
 license.file = "LICENSE"
 authors = [
-  { name = "Bennet Meyers", email = "bennetm@stanford.edu" },
+  { name = "Bennet Meyers", email = "bennetm@nlr.gov" },
 ]
 maintainers = [
   { name = "Sara Miskovich", email = "smiskov@slac.stanford.edu" },
@@ -79,7 +79,7 @@ dask = [
     ]
 
 [project.urls]
-Homepage = "https://github.com/slacgismo/solar-data-tools"
+Homepage = "https://github.com/NatLabRockies/solar-data-tools"
 Documentation = "https://solar-data-tools.readthedocs.io/"
-"Bug Tracker" = "https://github.com/slacgismo/solar-data-tools/issues"
-Discussions = "https://github.com/slacgismo/solar-data-tools/discussions"
+"Bug Tracker" = "https://github.com/NatLabRockies/solar-data-tools/issues"
+Discussions = "https://github.com/NatLabRockies/solar-data-tools/discussions"
