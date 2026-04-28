@@ -179,7 +179,7 @@ def standardize_time_axis(
     # then apply a correction
     if correct_tz and power_col is not None:
         if np.abs(sn_deviation) > 4:
-            df.index = df.index.shift(sn_deviation, freq="H")
+            df.index = df.index.shift(sn_deviation, freq="h")
         else:
             sn_deviation = 0
     else:

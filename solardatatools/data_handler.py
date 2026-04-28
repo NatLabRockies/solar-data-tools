@@ -636,7 +636,7 @@ class DataHandler:
                 # Related to this bug fix:
                 # https://github.com/NatLabRockies/solar-data-tools/commit/ae0037771c09ace08bff5a4904475da606e934da
                 old_index = self.data_frame.index.copy()
-                self.data_frame.index = self.data_frame.index.shift(tz_offset, freq="H")
+                self.data_frame.index = self.data_frame.index.shift(tz_offset, freq="h")
                 self.data_frame = self.data_frame.reindex(
                     index=old_index, method="nearest", limit=1
                 ).fillna(0)
