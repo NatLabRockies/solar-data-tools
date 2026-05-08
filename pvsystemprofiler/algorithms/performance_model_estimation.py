@@ -6,7 +6,7 @@ Calculates the angle incidence for a system based on its power matrix using sign
 """
 
 
-def find_fit_costheta(data_matrix, clear_index, doy):
+def find_fit_costheta(data_matrix, clear_index, doy, solver="CLARABEL"):
     """
     Fits a 'cos(theta)' curve to the given power, which is assumed to be smooth, yearly periodic, and symmetric around
     the summer solstice. Previous versions of this function did not enforce the symmetric constraint.
@@ -35,7 +35,10 @@ def find_fit_costheta(data_matrix, clear_index, doy):
     constraints.append(cvx.diff(x2, k=1) == z)
     phi3 = 1e3 * cvx.sum_squares(cvx.diff(x3, k=2)) + 1e-6 * cvx.norm1(x3)
     for val in set(solstice_centered_index(doy)):
-        constraints.append(cvx.diff(x3[solstice_centered_index(doy) == val]) == 0)
+        try:
+            constraints.append(cvx.diff(x3[solstice_centered_index(doy) == val]) == 0)
+        except ValueError:
+            pass
     constraints.append(x3 <= 0)
     phi4 = 1e3 * cvx.sum_squares(cvx.diff(x4, k=2)) + 1e-3 * cvx.sum_squares(x4)
     constraints.append(x4[:-365] == x4[365:])
@@ -43,7 +46,7 @@ def find_fit_costheta(data_matrix, clear_index, doy):
     objective = phi1 + phi2 + phi3 + phi4
 
     problem = cvx.Problem(cvx.Minimize(objective), constraints)
-    problem.solve(solver="OSQP")
+    problem.solve(solver=solver)
     normalized_data = data_matrix / np.exp(x2.value + x4.value)
     costheta_est = x3.value
     return normalized_data, costheta_est
