@@ -4,8 +4,8 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-11, follow-up assessment and owner decisions incorporated; technical specifications and validation remain pending
-- Status: working document; implementation is not authorized by this plan
+- Last revised: 2026-11-11, DH-01 completed and DH-02 opened for specification
+- Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
 
@@ -37,11 +37,11 @@ For each selected issue or explicitly bounded group:
    publication, deployment, and live cloud operations require their own applicable
    authorization.
 
-No implementation work is approved or completed at the time of writing. No
-execution schedule or release gate has been adopted. P1/P2 labels below preserve
-provisional materiality assessments; they do not establish an implementation
-order or supersede owner decisions. Design and performance proposals are
-identified separately from demonstrated defects.
+Section 9 records issue-specific authorizations and completed work. No execution
+schedule or release gate has been adopted. P1/P2 labels below preserve provisional
+materiality assessments without establishing an implementation order or
+superseding owner decisions. Design and performance proposals are identified
+separately from demonstrated defects.
 
 ### Decision-pass status and remaining specifications (2026-11-11)
 
@@ -54,10 +54,10 @@ resolving these narrower questions. Independent daylight-segment classification
 and the daily-energy fitting/accounting policies are now agreed, as are
 retraining for saved-model migration, default NaN padding for partial days
 in `make_2d`, and fixed-round fitting for explicit XGBoost classification.
-These decisions are recorded at their owning locations. None of the 62 issues
-is closed by this planning assessment, and implementation remains unauthorized.
-The remaining work needs concrete specifications and issue-specific review;
-empirical choices also require validation.
+These decisions are recorded at their owning locations. The planning assessment
+itself closed no issues. Section 9 records subsequent implementation and review.
+The remaining work needs concrete specifications and issue-specific review.
+Empirical choices also require validation.
 
 | Code location / issue | Remaining specification or decision | Public verification path |
 | --- | --- | --- |
@@ -131,6 +131,7 @@ implementation requests.
 
 #### DH-01 — Plotting an extra matrix mutates its stored values [P1]
 
+- **Status:** complete. See the [completion record](#2026-11-11--dh-01-completed).
 - **Location:** `DataHandler.plot_heatmap`, approximately lines 1674–1680.
 - **Finding:** the extra-matrix branch aliases `self.extra_matrices[matrix]`, then
   applies `mat /= 1000` when plotting watts as kilowatts. Each call changes the
@@ -142,6 +143,9 @@ implementation requests.
 
 #### DH-02 — Automatic time-shift retry mixes correction state from different runs [P1]
 
+- **Status, 2026-11-11:** open for specification. The retry removal is settled.
+  Confirm the public clock frame of undilated quantile outputs and sub-daily
+  masks before implementation.
 - **Location:** `run_pipeline`, approximately lines 603–617;
   `auto_fix_time_shifts`, approximately lines 1413–1415. Related:
   `algorithms/time_shifts.py`, `apply_corrections` and `invert_corrections`.
@@ -170,6 +174,13 @@ implementation requests.
   missingness; an explicitly identified corrected observed-data view is a
   proposed solution, rather than substituting filled data for observations or
   silently redefining the raw matrix.
+- **Mask export finding, 2026-11-11:** `augment_data_frame` currently
+  inverse-rolls every sub-daily mask when `time_shifts` is true. This is
+  appropriate for a mask computed in the corrected clock frame. The
+  `missing_values` mask is computed before relative clock correction, so
+  exporting it through that same path would move its entries away from their
+  observed timestamps. Specify how callers identify the frame
+  of a sub-daily mask and when export applies the inverse correction.
 - **Proposed verification:** exercise recurrence off and explicitly enabled,
   verify that a recommendation cannot trigger a retry or alter corrected data,
   and check extra-column alignment and transformation/inverse-transformation
@@ -4219,3 +4230,21 @@ register.
 - **Scope:** only this working plan was edited. No implementation, tests,
   numerical solves, installs, builds, or experiments were performed. New
   proposals and validation plans still require issue-specific direction.
+
+### 2026-11-11 — DH-01 completed
+
+- **Owner disposition:** accepted and committed on `cleanup` in
+  `dacc3037ea6068253ff7e5d769f472a28b84e774`.
+- **Agreed contract:** plotting leaves the stored matrix intact. The existing
+  W-to-kW scaling conditions and explicit `units` override apply.
+- **Authorized work and changes:** use out-of-place division in
+  `DataHandler.plot_heatmap` and add one regression for repeated extra-matrix
+  plots. Both plots show the expected kW values and label, and the stored watt
+  values and missing entry are preserved.
+- **Verification:** the initial regression reproduced double scaling on the
+  second plot before the fix. The final run of
+  `pytest -v tests/solardatatools/test_data_handler.py` passed both tests with
+  Python 3.13.11 in `sdt-dev` and `MPLBACKEND=Agg`. `git diff --check` passed.
+- **Review and remaining scope:** independent public-tool review inspected the
+  diff and plotting call path and reported no findings. The reviewer did not
+  rerun the tests. The owner accepted the result. DIL-01 remains open.
