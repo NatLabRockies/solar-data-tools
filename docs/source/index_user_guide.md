@@ -125,6 +125,28 @@ the pipeline. Here is a full list of the plotting methods available after runnin
 Note that the timeshift correction method must be run (by passing `fix_shifts=True` to `run_pipeline`)
 before calling the `plot_time_shift_analysis_results` method.
 
+### Clock frames after relative time-shift correction
+
+`run_pipeline(fix_shifts=True)` uses the selected time-shift model.
+Set `periodic_detector=True` to require exact 365-day recurrence of the
+clock-shift component.
+
+With `correct_tz=False`, `raw_data_matrix` and `boolean_masks.missing_values`
+stay on the observation clock, the standardized grid before relative correction.
+`corrected_observed_matrix` applies the relative correction to observations and
+their NaNs. Time dilation, PV quantile fitting, and Bundt plots use those
+observations with daylight bounds on the same corrected clock. In `PVQuantiles`,
+`sig_original` and `quantiles_original` refer to the regular sampling grid on
+the corrected clock. Undilation restores that grid and preserves the clock
+correction. Fitted quantiles can be defined where observations are missing.
+
+`augment_data_frame` exports sub-daily masks to observation timestamps. Its
+default `input_clock="corrected"` reverses the applied relative correction. For
+an observation-clock mask, pass `input_clock="observation"`, for example
+`dh.augment_data_frame(dh.boolean_masks.missing_values, "missing", input_clock="observation")`.
+Daily masks use dates in either case. The legacy timezone correction can also
+shift the raw matrix when `correct_tz=True`.
+
 Examples of some of these plotting methods are shown below in the notebooks and examples section,
 such as the [demo](getting_started/notebooks/demo_default.nblink) and the
 [tutorial](getting_started/notebooks/tutorial.ipynb).

@@ -297,7 +297,8 @@ class DataHandler:
         :param time_shift_weight_seasonal: Weight parameter for the seasonal time shift
                                            detector.
         :type time_shift_weight_seasonal: float, default=1e-3
-        :param periodic_detector: Whether to use a periodic detector for time shifts.
+        :param periodic_detector: If true, require exact 365-day recurrence of
+                                  the clock-shift component when fixing shifts.
         :type periodic_detector: bool, default=False
         :param solar_noon_estimator: Method to estimate solar noon. Options include
                                      "srss" (sunrise/sunset).
@@ -323,6 +324,10 @@ class DataHandler:
 
         :note:
             If using the MOSEK solver, ensure that a valid license is available.
+            With ``correct_tz=False``, ``raw_data_matrix`` and
+            ``boolean_masks.missing_values`` stay on the observation clock
+            during relative clock correction. The legacy timezone correction
+            can also shift the raw matrix when enabled.
         """
 
         if verbose:
@@ -368,6 +373,7 @@ class DataHandler:
         self.daily_flags = DailyFlags()
         self.capacity_analysis = None
         self.time_shift_analysis = None
+        self.time_shifts = None
         self.extra_matrices = {}  # Matrix views of extra columns
         self.extra_quality_scores = {}
         self.power_units = units
@@ -599,22 +605,6 @@ class DataHandler:
                     periodic_detector=periodic_detector,
                     solver=solver,
                 )
-                rms = lambda x: np.sqrt(np.mean(np.square(x)))  # noqa: E731
-                if rms(self.time_shift_analysis.s2) > 0.25:
-                    if verbose:
-                        print("Invoking periodic timeshift detector.")
-                    old_analysis = self.time_shift_analysis
-                    self.auto_fix_time_shifts(
-                        round_shifts_to_hour=round_shifts_to_hour,
-                        w1=time_shift_weight_change_detector,
-                        w2=time_shift_weight_seasonal,
-                        estimator=solar_noon_estimator,
-                        threshold=daytime_threshold,
-                        periodic_detector=True,
-                        solver=solver,
-                    )
-                    if rms(old_analysis.s2) < rms(self.time_shift_analysis.s2):
-                        self.time_shift_analysis = old_analysis
             except Exception as e:
                 msg = "Fix time shift algorithm failed."
                 self._error_msg += "\n" + msg
@@ -1023,7 +1013,9 @@ time zone errors     {report["time zone correction"] != 0}
         pi = np.divide(measured_energy, clear_energy)
         return pi
 
-    def augment_data_frame(self, boolean_index, column_name):
+    def augment_data_frame(
+        self, boolean_index, column_name, *, input_clock="corrected"
+    ):
         """
         Add a column to the data frame (tabular) representation of the data,
         containing True/False values at each time stamp.
@@ -1034,8 +1026,16 @@ time zone errors     {report["time zone correction"] != 0}
 
         :param boolean_index: Length N or size M X N numpy arrays of booleans
         :param column_name: Name for column
+        :param input_clock: Clock frame of a sub-daily mask. The default
+                            ``"corrected"`` inverts the applied relative clock
+                            correction before export. Use ``"observation"``
+                            for masks already aligned to the observations,
+                            such as ``boolean_masks.missing_values``. Daily
+                            masks are indexed by date in either case.
         :return:
         """
+        if input_clock not in ("corrected", "observation"):
+            raise ValueError('input_clock must be "corrected" or "observation"')
         if self.data_frame is None:
             print("This DataHandler object does not contain a data frame.")
             return
@@ -1060,7 +1060,7 @@ time zone errors     {report["time zone correction"] != 0}
         if not cond1 and not cond2:
             print("Boolean index shape does not match the data.")
         elif cond1:
-            if self.time_shifts:
+            if input_clock == "corrected" and self.time_shifts:
                 ts = self.time_shift_analysis
                 boolean_index = ts.invert_corrections(boolean_index)
             start = self.day_index[0]
@@ -1343,18 +1343,18 @@ time zone errors     {report["time zone correction"] != 0}
         periodic_detector=False,
         solver=None,
     ):
-        def max_min_scale(signal):
-            maximum = np.nanquantile(signal, 0.95)
-            minimum = np.nanquantile(signal, 0.05)
-            return (signal - minimum) / (maximum - minimum), minimum, maximum
+        """Fit and apply a relative clock correction to the filled matrix.
 
-        def rescale_signal(signal, minimum, maximum):
-            return (signal * (maximum - minimum)) + minimum
+        Re-fitting uses the same input clock. Use ``run_pipeline`` to also
+        refresh the daylight bounds and align extra columns.
+        """
+        filled = self.filled_data_matrix
+        if self.time_shifts:
+            filled = self.time_shift_analysis.invert_corrections(filled)
+        minimum, maximum = np.nanquantile(filled, [0.05, 0.95])
+        metric = (filled - minimum) / (maximum - minimum)
 
-        # scale data by min/max
-        metric, min_metric, max_metric = max_min_scale(self.filled_data_matrix)
-
-        self.time_shift_analysis = TimeShift()
+        analysis = TimeShift()
         if self.data_clearness_score >= 0.3:
             use_ixs = self.daily_flags.clear
         else:
@@ -1366,7 +1366,7 @@ time zone errors     {report["time zone correction"] != 0}
         # If running with QSS with a set w1: solve nonconvex problem
         if w1 is None or solver != "QSS":
             # Run with convex formulation first
-            self.time_shift_analysis.run(
+            analysis.run(
                 metric,
                 use_ixs=use_ixs,
                 w1=w1,
@@ -1382,7 +1382,7 @@ time zone errors     {report["time zone correction"] != 0}
         if solver == "QSS":
             if w1 is not None:
                 # Run with nonconvex formulation and set w1
-                self.time_shift_analysis.run(
+                analysis.run(
                     metric,
                     use_ixs=use_ixs,
                     w1=w1,
@@ -1397,10 +1397,10 @@ time zone errors     {report["time zone correction"] != 0}
             else:
                 # If solver is QSS, run with nonconvex formulation again
                 # using best_w1 from convex solution
-                self.time_shift_analysis.run(
+                analysis.run(
                     metric,
                     use_ixs=use_ixs,
-                    w1=self.time_shift_analysis.best_w1,
+                    w1=analysis.best_w1,
                     w2=w2,
                     solar_noon_estimator=estimator,
                     threshold=threshold,
@@ -1410,14 +1410,18 @@ time zone errors     {report["time zone correction"] != 0}
                     round_shifts_to_hour=round_shifts_to_hour,
                 )
 
-        # Scale data back
-        self.filled_data_matrix = rescale_signal(
-            self.time_shift_analysis.corrected_data, min_metric, max_metric
-        )
-        if len(self.time_shift_analysis.index_set) == 0:
-            self.time_shifts = False
-        else:
-            self.time_shifts = True
+        time_shifts = bool(np.any(analysis.roll_by_index))
+        corrected = analysis.apply_corrections(filled) if time_shifts else filled
+        self.time_shift_analysis = analysis
+        self.filled_data_matrix = corrected
+        self.time_shifts = time_shifts
+
+    @property
+    def corrected_observed_matrix(self):
+        """Observed samples and NaNs on the clock used for pipeline analysis."""
+        if self.time_shifts:
+            return self.time_shift_analysis.apply_corrections(self.raw_data_matrix)
+        return self.raw_data_matrix
 
     def detect_clear_days(
         self, smoothness_threshold=0.9, energy_threshold=0.8, solver=None

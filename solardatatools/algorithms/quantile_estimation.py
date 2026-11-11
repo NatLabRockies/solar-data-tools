@@ -17,6 +17,13 @@ from solardatatools.plotting import plot_bundt_cake
 
 
 class PVQuantiles:
+    """Fit PV power quantiles using daylight bounds on the corrected clock.
+
+    ``sig_original`` and ``quantiles_original`` use the regular sampling grid
+    on that clock. Observations retain their NaNs. Fitted quantiles can be
+    defined at those gaps.
+    """
+
     def __init__(
         self,
         data_handler,

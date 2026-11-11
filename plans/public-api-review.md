@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-11, DH-01 completed and DH-02 opened for specification
+- Last revised: 2026-11-11, DH-01 completed and DH-02 implementation recorded
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -143,9 +143,9 @@ implementation requests.
 
 #### DH-02 — Automatic time-shift retry mixes correction state from different runs [P1]
 
-- **Status, 2026-11-11:** open for specification. The retry removal is settled.
-  Confirm the public clock frame of undilated quantile outputs and sub-daily
-  masks before implementation.
+- **Status, 2026-11-11:** implementation and verification are recorded below.
+  Completion requires owner acceptance. See the
+  [decision record](#2026-11-11--dh-02-clock-frame-contract-approved).
 - **Location:** `run_pipeline`, approximately lines 603–617;
   `auto_fix_time_shifts`, approximately lines 1413–1415. Related:
   `algorithms/time_shifts.py`, `apply_corrections` and `invert_corrections`.
@@ -179,8 +179,8 @@ implementation requests.
   appropriate for a mask computed in the corrected clock frame. The
   `missing_values` mask is computed before relative clock correction, so
   exporting it through that same path would move its entries away from their
-  observed timestamps. Specify how callers identify the frame
-  of a sub-daily mask and when export applies the inverse correction.
+  observed timestamps. Use the input clock to determine whether to apply the
+  inverse correction.
 - **Proposed verification:** exercise recurrence off and explicitly enabled,
   verify that a recommendation cannot trigger a retry or alter corrected data,
   and check extra-column alignment and transformation/inverse-transformation
@@ -4248,3 +4248,41 @@ register.
 - **Review and remaining scope:** independent public-tool review inspected the
   diff and plotting call path and reported no findings. The reviewer did not
   rerun the tests. The owner accepted the result. DIL-01 remains open.
+
+### 2026-11-11 — DH-02 clock frame contract approved
+
+- **Owner disposition:** remove the automatic recurrence retry and adopt the
+  caller-selected analysis, applied correction, and status together.
+- **Agreed contract:** `raw_data_matrix` and `boolean_masks.missing_values`
+  stay on the standardized observation clock before relative correction.
+  Apply the accepted sample permutation $P$ to observed values and NaNs
+  together for dilation. Use daylight bounds on that same corrected clock.
+  Undilation returns to the regular sampling grid on the corrected clock.
+  Document that `sig_original` and `quantiles_original` refer to the regular
+  grid, and allow fitted quantiles to remain defined across observation gaps.
+- **Mask export:** `augment_data_frame(..., input_clock="corrected")` applies
+  $P^{-1}$ to a corrected-clock sub-daily mask before export. Pass
+  `input_clock="observation"` for an observation-clock mask such as
+  `boolean_masks.missing_values`. Daily masks are indexed by date.
+- **Authorized scope:** implement DH-02, add focused regression tests, and
+  obtain independent public-tool review. The interim observation-clock
+  guarantee applies with `correct_tz=False`. DH-04 owns retirement of the
+  legacy timezone correction that can also roll `raw_data_matrix`. SHIFT-01
+  owns evaluation of the recurrence recommendation.
+- **Changes made:** run the selected recurrence mode without an automatic
+  retry. Adopt the analysis and the applied permutation together. Dilation
+  uses `corrected_observed_matrix` for observed data, and sub-daily mask
+  export accepts the agreed `input_clock` keyword. The user guide documents
+  the public clock frames and the interim timezone limitation.
+- **Verification:** the initial two pipeline cases reproduced automatic
+  retries against `1b24f87799db6c45126c5eda1f3955506ed0047f`. With the fix,
+  they check the applied permutation, including raw data and missingness,
+  extra columns, daylight, dilation/Bundt and quantile outputs, and mask
+  export for both input clocks. A third regression checks explicit refitting
+  on the same input and retention of the accepted result if a refit fails.
+  The focused run passed all eight tests across clock frames, DataHandler,
+  time shifts, quantile/dilation, and Bundt plotting in `sdt-dev` (Python
+  3.13.11, `MPLBACKEND=Agg`). Ruff and `git diff --check` passed.
+- **Verification scope:** the clock-frame regressions inject the shift and
+  selected fits to verify coordinate transformations. The existing time-shift
+  and quantile/dilation fixtures exercise the numerical estimators.

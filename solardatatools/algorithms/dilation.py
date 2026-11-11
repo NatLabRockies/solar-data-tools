@@ -15,13 +15,21 @@ DEFAULT = {
 
 
 class Dilation:
+    """Resample daily signals using daylight bounds on the corrected clock.
+
+    ``matrix="raw"`` uses observations with their NaNs preserved and applies
+    the pipeline's relative clock correction. ``matrix="filled"`` uses the
+    already aligned filled data. ``signal_ori`` is the selected signal on the
+    regular sampling grid, in the same clock frame as the daylight bounds.
+    """
+
     def __init__(
         self, data_handler, nvals_dil=DEFAULT["nvals_dil"], matrix=DEFAULT["matrix"]
     ):
         config = {"nvals_dil": nvals_dil, "matrix": matrix}
         self.config = config
         if self.config["matrix"] == "raw":
-            mat = data_handler.raw_data_matrix
+            mat = data_handler.corrected_observed_matrix
         elif self.config["matrix"] == "filled":
             mat = data_handler.filled_data_matrix
         else:
@@ -125,6 +133,7 @@ def dilate_signal(signal_idx_dil, signal_idx_ori, signal_ori):
 def undilate_signal(signal_idx_ori, signal_idx_dil, signal_dil):
     """
     This function undilates a signal from the dilated time grid to the regular time grid.
+    The clock frame is preserved.
 
     :param signal_idx_ori: ndarray, 1D array with the original index (length m).
     :param signal_idx_dil: ndarray, 1D array with the dilated index (length n).
@@ -145,6 +154,7 @@ def undilate_quantiles(
 ):
     """
     This function undilates a 2D matrix of quantiles from the dilated time grid to the regular time grid.
+    The clock frame is preserved.
 
     :param signal_idx_ori: ndarray, 1D array with the original index (length m).
     :param signal_idx_dil: ndarray, 1D array with the dilated index (length n).
