@@ -1677,7 +1677,7 @@ time zone errors     {report["time zone correction"] != 0}
             return
         if units is None:
             if scale_to_kw and self.power_units == "W":
-                mat /= 1000
+                mat = mat / 1000
                 units = "kW"
             else:
                 units = self.power_units

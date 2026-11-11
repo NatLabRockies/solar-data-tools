@@ -1,11 +1,30 @@
 import unittest
 from pathlib import Path
+import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from solardatatools import DataHandler
 
 
 class TestDataHandler(unittest.TestCase):
+    def test_plot_extra_matrix_preserves_watt_values(self):
+        dh = DataHandler()
+        dh.power_units = "W"
+        watts = np.array([[0.0, np.nan], [1250.0, 2500.0]])
+        dh.extra_matrices["sensor"] = watts.copy()
+
+        for _ in range(2):
+            fig = dh.plot_heatmap(matrix="sensor")
+            try:
+                np.testing.assert_array_equal(
+                    fig.axes[0].images[0].get_array().filled(np.nan), watts / 1000
+                )
+                self.assertEqual(fig.axes[1].get_ylabel(), "kW")
+            finally:
+                plt.close(fig)
+
+        np.testing.assert_array_equal(dh.extra_matrices["sensor"], watts)
+
     def test_load_and_run(self):
         filepath = Path(__file__).parent.parent
         data_file_path = filepath / "fixtures" / "data_transforms" / "timeseries.csv"
