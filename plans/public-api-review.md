@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-11, DH-02 completed and DH-03 implementation recorded
+- Last revised: 2026-11-11, DH-04 implementation recorded; DH-08 proposal and sequencing added
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -37,9 +37,10 @@ For each selected issue or explicitly bounded group:
    publication, deployment, and live cloud operations require their own applicable
    authorization.
 
-Section 9 records issue-specific authorizations and completed work. No execution
-schedule or release gate has been adopted. P1/P2 labels below preserve provisional
-materiality assessments without establishing an implementation order or
+Section 9 records issue-specific authorizations and completed work. No
+repository-wide execution schedule or release gate has been adopted; DH-08
+records a bounded implementation sequence for pipeline refactoring. P1/P2 labels
+below preserve provisional materiality assessments without establishing an implementation order or
 superseding owner decisions. Design and performance proposals are identified
 separately from demonstrated defects.
 
@@ -191,9 +192,8 @@ implementation requests.
 
 #### DH-03 — Unit handling overrides explicit input and labels energy by magnitude [P2]
 
-- **Status, 2026-11-11:** implementation and verification recorded. Completion
-  requires owner acceptance. See the
-  [decision record](#2026-11-11--dh-03-units-contract-approved).
+- **Status, 2026-11-11:** complete. See the
+  [decision and completion record](#2026-11-11--dh-03-units-contract-approved).
 - **Location:** `run_pipeline`, lines 432–434; `make_filled_data_matrix`, lines
   1127–1130; `plot_daily_energy`, approximately line 2057;
   `run_loss_factor_analysis` and `algorithms/loss_factor_analysis.py` reports.
@@ -232,6 +232,9 @@ implementation requests.
 
 #### DH-04 — Replace automatic timezone correction with a midnight-production warning [P2; revised disposition]
 
+- **Status, 2026-11-11:** implementation and verification recorded. Completion
+  requires owner acceptance. See the
+  [decision record](#2026-11-11--dh-04-advisory-contract-approved).
 - **Locations:** `run_pipeline`, approximately lines 628–651; missing-value mask
   construction near line 435; extra-column processing near lines 659–679;
   `standardize_time_axis` in `time_axis_manipulation.py`, approximately lines
@@ -266,6 +269,13 @@ implementation requests.
   inferred-offset return/report fields in the migration guide. Expose the
   advisory result distinctly from an applied correction; it does not establish
   a particular timezone or offset.
+- **Caller findings, 2026-11-11:** `standardize_time_axis` is a package export
+  and currently returns a `(frame, inferred_offset)` tuple. The handler and
+  profiler scripts pass `correct_tz`; profiler partition inputs expose it as a
+  configuration field. Dask consumes the handler report dictionary. Specify a
+  compatibility policy for those interfaces. Once both corrections are retired,
+  DH-02's observation-clock contract no longer needs its interim timezone
+  exception.
 - **Proposed verification:** shifted production profiles with and without
   meaningful midnight production, low-level noise, isolated anomalies, and
   missing midnight observations. Check warning behavior and unchanged timestamp,
@@ -344,6 +354,14 @@ implementation requests.
   fallback, a successful negative finding, and an unrequested/skipped stage
   distinguishable. Reporting must retain available metrics even when another
   stage is unavailable. Record diagnostics independently of `verbose` printing.
+- **Current-attempt lifetime, refactoring follow-up:** record each stage's
+  outcome, reason, and elapsed time for the current attempt, while retaining
+  arrays and analysis objects at their existing public locations. Establish the
+  attempt before solver preflight or any early return: the current MOSEK check
+  precedes attribute reset, so an early failure can expose a previous run's
+  results even with `reset=True`. Settle `reset=False` explicitly, distinguishing
+  reusable computation from results that belong to an earlier attempt. These
+  outcome and reset changes belong to DH-07, separately from DH-08's extraction.
 - **Concrete dependency gates, follow-up review:** the final daytime fit in
   `run_pipeline` (around line 653) is outside the earlier exception handlers;
   preserve partial reporting if it fails and skip consumers requiring its
@@ -360,11 +378,71 @@ implementation requests.
   and partial reports with the failure reasons intact. Exercise time-shift
   failure with unchanged input data and no `False` substitution for its detection
   result. Verify that Dask records the partial outcome and continues other data
-  keys without requiring a user-supplied exception handler. Include a repeated
-  run to exclude stale results from the reported outcome.
+  keys without requiring a user-supplied exception handler. Include a successful
+  run followed by a failed rerun, covering both an early preflight failure and
+  an optional-stage failure, to exclude stale results from the reported outcome.
 - **Related:** SD-01/SD-06 define numerical failure results; SD-03/SD-04 define
   usable fallbacks; DH-02 owns correction-state consistency. This item does not
   authorize a new pipeline framework or execution of the proposed checks.
+
+#### DH-08 — Extract explicit pipeline stages while preserving established behavior [design proposal]
+
+- **Locations:** `DataHandler.run_pipeline`, beginning at line 221 on
+  `c4ce08e`, and its preparation, filling, scoring, clock-correction, and
+  extra-column helpers in `data_handler.py`.
+- **Rationale:** the method spans roughly 490 lines on that revision, including
+  its signature and docstring. Analysis order is interleaved with solver setup,
+  progress reporting, exception handling, and writes to shared state. Extract a
+  short, explicit sequence of ordinary private methods, retaining `DataHandler`
+  as the public interface. This is a maintainability proposal, not a new
+  numerical model or a generic pipeline framework.
+- **Proposed stage boundaries:**
+
+  | Stage | Responsibility |
+  | --- | --- |
+  | Prepare observations | Select the power column, standardize and embed timestamps, apply value bounds, establish the day axis and observation mask, and run DH-04's advisory on observations before filling. Consume the shared grid established by TIME-01/02. |
+  | Estimate provisional daylight and fill | Estimate daylight from observations, use it for requested nighttime filling, integrate daily energy, and assess whether the filled data are usable. |
+  | Score days and run daily analyses | Preserve quality scoring, flagging, clear-day detection, clipping, dataset summary scoring, and capacity estimation in their established order, with their individual calls and prerequisites visible. |
+  | Apply clock correction and refresh daylight | Keep DH-02's accepted correction and metadata together. Refresh daylight on the resulting clock, preserving the threshold selected by the provisional fit. |
+  | Align extra columns | Embed extra columns on the shared grid and apply the accepted clock correction. Keep matrix availability distinct from quality scoring, which requires the final daylight mask. |
+
+- **Behavior-preserving boundary:** retain the public signature and return
+  value, option forwarding, stage order, public result locations, clock and unit
+  conventions, and the behavior established by preceding fixes. In particular,
+  the clock fit selects days using earlier quality and clear-day results; do
+  not move it earlier or automatically rescore those quantities afterward.
+  Preserve individual exception boundaries inside grouped stages rather than
+  introducing one catch around all daily analyses. DH-07 owns intentional
+  changes to failure propagation, dependency gates, partial results, extra-column
+  availability after daylight failure, and reset semantics.
+- **Separate clock-alignment correction:** clipping retains the pre-correction
+  matrix, while orientation fitting can consume its subdaily mask alongside
+  corrected data. Track this correctness change separately from extraction,
+  cross-referencing DH-02 and PROF-03. For the accepted sample permutation
+  $P$, require $M_{\mathrm{clip,corr}} = P M_{\mathrm{clip,obs}}$, preserving the
+  fitted clipping classification and transforming coordinates exactly once.
+  Give that correction a dedicated nonzero-shift regression; mechanical
+  extraction does not resolve or authorize it.
+- **Explicit implementation sequence:** complete DH-04, then TIME-01/TIME-02,
+  then DH-08's mechanical extraction, then DH-07's behavioral changes. This
+  pulls the time-axis work ahead of DH-07 so preparation has a settled grid
+  contract before extraction. Specify DH-07's stage outcomes and reset contract
+  before DH-08, but implement those changes in a separate subsequent diff.
+  DH-08 need not wait for the native decomposition rewrite; DH-07's integration
+  must respect the result contracts owned by SD-01/SD-06. DH-05/DH-06 remain
+  independently scheduled. Document placement beside DH-07 reflects code
+  location, not implementation order.
+- **Proposed verification:** retain the clock-frame and units regressions and
+  add a small deterministic orchestration check using stage substitutes to
+  verify call order, forwarded options, and representative public outputs.
+  Cover correction enabled and disabled and preservation of the provisional
+  daylight threshold during refresh. Compare behavior against the accepted
+  post-DH-04/TIME baseline; avoid tests that merely duplicate every private
+  helper. DH-07 owns the changed failure/reset regressions, and the separate
+  clipping correction owns its mask-alignment regression.
+- **Authorization:** addition of this proposal and sequencing note is a plan
+  edit only. Implementation and its verification require issue-specific
+  direction under the procedure above.
 
 ### `solardatatools/time_axis_manipulation.py`
 
@@ -4333,3 +4411,72 @@ register.
   `MPLBACKEND=Agg`). Ruff checks and `git diff --check` passed. The unit tests
   inject loss results to verify conversion and reporting independently of the
   LFA numerical estimator.
+- **Completion:** the independent public-tool review inspected all eight files,
+  independently passed the five new regressions, and reported no findings.
+  The owner accepted and committed the work on `cleanup` in
+  `c4ce08ed56e0ffad533132f8a10426ea9863d162`. The near-zero fit cutoff remains
+  under LFA-05.
+
+### 2026-11-11 — DH-04 advisory contract approved
+
+- **Owner disposition:** replace both automatic timezone shifts with a
+  nonmutating advisory. Retain explicit timezone utilities, ordinary
+  standardization, and caller-requested relative clock correction.
+- **Advisory rule:** evaluate standardized observations before filling and
+  relative correction. For each interior midnight use the preceding
+  `[23:00, 24:00)` and following `[00:00, 01:00)` windows. Require at least
+  half the expected samples in each window to be finite. Flag possible
+  misalignment if at least one observed value in either window exceeds 5% of
+  the record-wide 95th percentile of finite positive observations on at least
+  three eligible midnights and at least 10% of eligible midnights. Treat fewer
+  than three eligible midnights or an unavailable positive reference as an
+  unassessed check. For timestamped inputs, count only source observations
+  mapped strictly within half a sampling interval of the grid timestamp.
+  This keeps nearest-neighbor copies from supplying diagnostic coverage while
+  leaving the standardized grid unchanged. The thresholds are initial defaults.
+- **Reporting:** expose the advisory separately as `True`, `False`, or `None`
+  for detected production, no evidence under the rule, or an unassessed
+  check. Emit an advisory warning for `True`, including in quiet runs. The
+  result indicates possible timezone misalignment and supplies no offset.
+- **Compatibility transition:** accept explicit `correct_tz=True` and
+  `correct_tz=False` as deprecated no-ops. Keep `standardize_time_axis`'s
+  `(frame, 0)` return and the handler's legacy correction attribute and
+  report field at zero. Retain profiler configuration inputs during the
+  transition. Remove the interim timezone exception from DH-02's public
+  observation-clock contract.
+- **Authorized scope:** implement the advisory and compatibility transition,
+  add focused regressions and assess downstream behavior on warned data,
+  then obtain independent public-tool review. Daylight-model changes and
+  general partial-report handling remain separate.
+- **Owner verification priority:** retain the raw heatmap when unusual data
+  prevent a usable daylight fit. Verify that the plot renders the observations
+  and gaps on the unchanged observation clock after that pipeline exit.
+- **Changes made:** retired both timezone adjustments and moved the advisory
+  to the handler's observation stage. The legacy arguments, return value,
+  and correction fields retain their compatibility forms. The user guide
+  documents the warning, migration, and raw-heatmap diagnostic.
+- **Verification:** two public regressions reproduced the earlier and later
+  timezone shifts against `c4ce08e`. The final scoped run passed 24 tests in
+  `sdt-dev` (Python 3.13.11, `MPLBACKEND=Agg`) across the nine new advisory
+  cases, standardization, the handler, relative shifts, units, and profiling.
+  Ruff and `git diff --check` passed.
+- **Downstream observations:** the intermittent-crossing case warned and
+  produced daylight estimates and daily integrals. The consistently wrapped
+  case warned and exited after finding no usable daylight observations. Its
+  advisory and raw heatmap remained available. The heatmap showed the original
+  observation-grid values and gaps with the default kW display scaling. These
+  cases verify diagnostic access and alignment rather than daylight-estimator
+  validity on wrapped production profiles.
+
+### 2026-11-11 — DH-08 proposal and bounded sequencing recorded
+
+- **Owner direction:** add the pipeline refactoring proposal beside DH-07 and
+  record the explicit implementation sequence: DH-04, TIME-01/TIME-02, DH-08,
+  then DH-07's behavioral changes. Specify DH-07's outcome/reset contract before
+  extraction; DH-05/DH-06 remain independently scheduled.
+- **Scope:** preserve established behavior during extraction into private
+  stages. Keep failure/reset changes in DH-07 and the clipping-mask coordinate
+  correction separate. The native decomposition rewrite is not a prerequisite
+  for extraction.
+- **Authorization:** edit this plan only. This entry authorizes no source-code
+  changes or execution of proposed verification.
