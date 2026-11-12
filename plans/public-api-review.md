@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-12, CI review feedback incorporated
+- Last revised: 2026-11-12, plotting extraction added and reporting extraction coordinated with DH-07
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -38,8 +38,8 @@ For each selected issue or explicitly bounded group:
    authorization.
 
 Section 9 records issue-specific authorizations and completed work. No
-repository-wide execution schedule or release gate has been adopted; DH-08 and
-CI-01 record bounded implementation sequences for pipeline refactoring and the
+repository-wide execution schedule or release gate has been adopted; DH-08/DH-09
+and CI-01 record bounded implementation sequences for pipeline refactoring and the
 first CI work package. P1/P2 labels below preserve provisional materiality
 assessments without establishing an implementation order or superseding owner
 decisions. Design and performance proposals are identified separately from
@@ -64,7 +64,7 @@ Empirical choices also require validation.
 | Code location / issue | Remaining specification or decision | Public verification path |
 | --- | --- | --- |
 | `data_handler.py`, dilation — DH-02/DH-07 | Keep observed values, daylight bounds, and masks in the same clock frame; define usable-result dependency gates and preserve partial reports. | Nonzero clock correction through PV quantiles/Bundt and mask export; failed optional stages through handler/Dask reports. |
-| Time transformations — TIME-01/TIME-02 | Settle cadence inference, calendar boundaries, and the public snapping diagnostics contract. | Fractional-second and partial-day inputs through matrices, extra columns, mask export, profiler coordinates, and the midnight advisory. |
+| Time transformations — TIME-01/TIME-02 | Completed in `e0a365d`. | Fractional-second and partial-day inputs through matrices, extra columns, mask export, profiler coordinates, and the midnight advisory. |
 | Native decomposition — SD-01/SD-03/SD-05/SD-06 | Specify result fields, Fourier/penalty details, numerical tolerances, solver-option migration, and recurrence-compatible pooled support. | Pipeline solver pass-through and a recurring shift ending partway through a cycle, including its single fixed-support refit. |
 | Capacity/time-shift selection — CAP-02/SHIFT-01 | Validate bounded endpoint extension, numerical constancy, screening, and the recurrence advisory; remove contradictory correction suppression. | Selection and plots share the verified reference, including zero error; accepted short-lived shifts survive correction application. |
 | Clear-sky classification — CLEAR-01 | Apply the agreed independent-daylight-segment objective through the public wrapper. | `DataHandler.detect_clear_sky` agrees with exhaustive segment-wise path optimization. |
@@ -364,6 +364,25 @@ implementation requests.
   results even with `reset=True`. Settle `reset=False` explicitly, distinguishing
   reusable computation from results that belong to an earlier attempt. These
   outcome and reset changes belong to DH-07, separately from DH-08's extraction.
+- **Approved contract, 2026-11-12:** publish a status, reason, and elapsed time
+  for each independently failing pipeline analysis in the machine-readable
+  handler and Dask reports. Distinguish success, usable warned fallback,
+  failure, dependency skip, and unrequested work. Use `None` for unavailable
+  findings and `False` for an assessed negative finding. Start a fresh result
+  attempt before solver preflight with either reset setting. `reset=False`
+  may reuse compatible computation, with previous fits and metrics excluded
+  from the current attempt. The owner identified no workflow requiring a
+  prior fit to be retained. Implement this contract under DH-07 after DH-08.
+- **Reporting extraction, owner direction 2026-11-12:** coordinate separation
+  of report construction and console formatting with this issue's outcome and
+  partial-result changes. Retain `DataHandler.report` as the public wrapper;
+  move supporting logic into ordinary functions in an internal reporting module,
+  consuming explicit metrics and current-attempt outcomes. Keep state ownership
+  and result lifetime in `DataHandler`. Console output and the machine-readable
+  handler/Dask reports must use the same outcome interpretation, including
+  unavailable findings and usable warned fallbacks. Perform this extraction
+  with DH-07 so its reporting logic is changed once against the approved
+  contract, separately from DH-08 and DH-09.
 - **Concrete dependency gates, follow-up review:** the final daytime fit in
   `run_pipeline` (around line 653) is outside the earlier exception handlers;
   preserve partial reporting if it fails and skip consumers requiring its
@@ -383,12 +402,19 @@ implementation requests.
   keys without requiring a user-supplied exception handler. Include a successful
   run followed by a failed rerun, covering both an early preflight failure and
   an optional-stage failure, to exclude stale results from the reported outcome.
+  Verify that extracted report construction and formatting preserve the same
+  available metrics, statuses, and reasons across console, handler, and Dask
+  outputs, including partial results and both reset settings.
 - **Related:** SD-01/SD-06 define numerical failure results; SD-03/SD-04 define
   usable fallbacks; DH-02 owns correction-state consistency. This item does not
   authorize a new pipeline framework or execution of the proposed checks.
 
 #### DH-08 — Extract explicit pipeline stages while preserving established behavior [design proposal]
 
+- **Status, 2026-11-12:** next implementation item in the pipeline sequence.
+  The accepted DH-04 and TIME-01/TIME-02 changes establish the baseline.
+  The owner approved DH-07's outcome and reset contract and authorized the
+  behavior-preserving extraction, focused tests, and public-tool review.
 - **Locations:** `DataHandler.run_pipeline`, beginning at line 221 on
   `c4ce08e`, and its preparation, filling, scoring, clock-correction, and
   extra-column helpers in `data_handler.py`.
@@ -424,8 +450,9 @@ implementation requests.
   extraction. The coordinate correction requires a separate implementation
   and nonzero-shift regression.
 - **Explicit implementation sequence:** complete DH-04, then TIME-01/TIME-02,
-  then DH-08's mechanical extraction, then DH-07's behavioral changes. This
-  gives preparation a settled grid contract before extraction, including the
+  then DH-08's mechanical extraction, then DH-09's separate plotting extraction,
+  then DH-07's behavioral changes with reporting extraction. This gives
+  preparation a settled grid contract before extraction, including the
   advisory's use of accepted observations. Specify DH-07's stage outcomes and
   reset contract before DH-08 and implement those changes in a subsequent diff.
   DH-08 need not wait for the native decomposition rewrite; DH-07's integration
@@ -447,15 +474,53 @@ implementation requests.
   edit only. Implementation and its verification require issue-specific
   direction under the procedure above.
 
+#### DH-09 — Extract plotting support while retaining the public handler methods [design proposal]
+
+- **Status and sequence, 2026-11-12:** owner accepted a separate plotting
+  extraction after DH-08. Schedule it as its own checkpoint before DH-07;
+  reporting extraction belongs with DH-07. This entry authorizes planning only.
+- **Locations:** `DataHandler.plot_*` in `solardatatools/data_handler.py`,
+  `solardatatools/plotting.py`, and a private plotting module if needed to keep
+  handler-specific support separate from the existing public plotting API.
+- **Rationale:** the inspected handler contains 15 plotting methods totaling
+  891 lines including docstrings, within a 2,754-line module. Rendering is a
+  substantial separate responsibility. Extraction should clarify dependencies
+  and permit focused plotting tests; it makes no solver-performance claim.
+- **Proposed correction:** retain thin public `DataHandler.plot_*` methods
+  that select the relevant observations or fitted results, resolve masks,
+  dates, units, and existing prerequisites, and delegate plot construction.
+  Use ordinary plotting functions with explicit arrays and metadata. Reuse
+  existing plotting functions and algorithm-owned plots where appropriate.
+  Avoid a mixin hierarchy or helpers that require the entire mutable handler
+  merely to relocate existing code. Keep pipeline sequencing, initialization,
+  and ownership of analysis state in `DataHandler`.
+- **Behavior-preserving boundary:** retain public method signatures, return
+  conventions, defaults, and established plot content. Preserve the selected
+  observation/corrected clock, date axes, masks, units, and source-array
+  immutability. Keep existing public plotting entry points available; internal
+  extraction does not require a new public API. DH-05/DH-06 own the separately
+  planned Bundt calendar and prerequisite corrections, and PROF-03 owns clipping
+  mask alignment. Do not fold those behavioral changes into this extraction.
+  Moving the small score/flag/signal/mask container classes is outside this item.
+- **Proposed verification:** exercise public handler methods and the extracted
+  rendering functions with representative prepared inputs under `Agg`. Cover
+  raw, filled, and extra-matrix heatmaps, daily energy and its units, an
+  algorithm-result plot, and Bundt rendering with satisfied prerequisites.
+  Check returned figures, plotted values, dates, mask/flag selection, option
+  forwarding, and unchanged source arrays. Retain existing clock, unit, and
+  raw-heatmap-after-early-exit regressions. Use semantic plot assertions and
+  focused headless rendering checks without requiring pixel-identical output.
+- **Authorization:** this is a plan-only addition. Source/test implementation
+  and execution of the proposed verification require issue-specific direction.
+
 ### `solardatatools/time_axis_manipulation.py`
 
 #### Shared grid contract for TIME-01 and TIME-02
 
-**Status:** owner approved the cadence, boundary, timezone, and diagnostics
-defaults on 2026-11-11 and authorized implementation, focused tests, and
-independent public-tool review. Implementation and verification are recorded
-below. Completion requires owner acceptance before extracting DH-08's
-preparation stage.
+**Status:** TIME-01 and TIME-02 are complete. The owner approved the contract
+on 2026-11-11 and accepted and committed the reviewed implementation on
+2026-11-12 in `e0a365d21ee0fbb8d118a19f8c4cada22d38b72d`. The shared grid is
+the baseline for DH-08's preparation stage.
 
 **Cadence and clock**
 
@@ -3466,18 +3531,54 @@ tests, installations, or experiments.
     inputs and interpreter/platform. No lockfile or dependency-manager migration
     is required. Record resolved dependency versions for diagnosis.
   - Extend the existing build check to build sdist and wheel, run `twine check`,
-    and install the wheel into an isolated environment. From outside the checkout,
-    exercise representative base-install public entry points and packaged
-    resources, verifying import origins. Select a small, concrete set of these
-    smoke checks before writing the workflow. Keep broader numerical validation
-    and known package defects with their existing QA/PKG issues.
+    and install the exact built wheel into a fresh isolated environment with its
+    base dependencies. Run the four agreed smoke checks below on Linux with
+    Python 3.12 in the existing build job, using a standalone script outside the
+    checkout and no development extras. Keep broader numerical validation and
+    known package defects with their existing QA/PKG issues.
     Use the selected interpreter without `sudo`, and retain the distributions
-    as artifacts. This is the initial
-    installed-wheel check under QA-02, not completion of all its integration work.
+    as artifacts. This is the initial installed-wheel check under QA-02, not
+    completion of all its integration work.
   - Set `MPLBACKEND=Agg` explicitly, add bounded job timeouts, and retain test
     reports on test failure when available. Record pytest durations and setup
     timings to inform later optimization. Select timeout values from observed
     runs with margin rather than truncating legitimate numerical tests.
+- **Installed-wheel smoke checks (owner accepted 2026-11-12):** run with
+  `MPLBACKEND=Agg`, generated inputs, and installed package resources. Verify
+  import origins so the checkout cannot satisfy a missing wheel module.
+
+  1. **Distribution identity and imports:** import `solardatatools`,
+     `pvsystemprofiler`, `anomalydetector`, and `sdt_dask`; verify that their
+     origins belong to the installed distribution and lie outside the checkout.
+     Check that `solardatatools.__version__` matches the installed distribution
+     metadata and run a dependency-consistency check. The `sdt_dask` root import
+     checks package presence; optional functionality remains under CI-02.
+  2. **Packaged resources:** load `clear_PCA.txt`, `Q.txt`, `eigvals.txt`,
+     `mu.txt`, and `transformed_data_corpus.zip` from the installed
+     `solardatatools/fixtures` directory. Verify readable, nonempty contents
+     without exact numerical fixture or hash comparisons. No shading solve is
+     required.
+  3. **Transforms and headless rendering:** generate two complete days of
+     15-minute observations, including one explicit NaN value while retaining
+     its timestamp. Exercise public `standardize_time_axis` and `make_2d` calls;
+     assert a `(96, 2)` matrix, the corresponding two dates, and preservation of
+     values and missingness. Construct `DataHandler(raw_data_matrix=matrix)`,
+     render its raw heatmap with `scale_to_kw=False`, save a nonempty PNG, and
+     close the figure. Use a complete, aligned grid so this check does not depend
+     on TIME-01/TIME-02's new snapping behavior or require a pipeline run.
+  4. **One solver-backed public call:** call
+     `solardatatools.signal_decompositions.l2_l1d2_constrained` with
+     `solver="CLARABEL"` on the 21-point ramp \(y_i=i/20\),
+     \(i=0,\ldots,20\). The ramp satisfies the fixed endpoints and has zero
+     residual and second-difference penalties, giving the analytic solution
+     \(\hat y=y\). Check output shape, finiteness, and agreement with the ramp;
+     provisionally use an absolute tolerance of \(10^{-4}\), confirmed during
+     implementation. Preserve this analytic case through the native refactor
+     using its public interface; do not freeze private OSD objects or legacy
+     tuple positions as part of the smoke contract.
+
+  Full pipeline coverage, optional extras, and broader numerical comparisons
+  remain with the existing suite and QA-02/QA-04.
 - **Explicit sequence:** schedule this as a separate early CI checkpoint,
   before relying on CI for the broader native-decomposition changes. It does
   not depend on TIME-01/TIME-02 or DH-08 and does not alter their agreed sequence;
@@ -4832,3 +4933,73 @@ register.
   changes require separate authorization. The review used current local
   sources and official tooling documentation; Actions timings and repository
   protection settings remain unverified.
+
+### 2026-11-12 — TIME-01 and TIME-02 completed, DH-08 opened
+
+- **Completion:** the independent public-tool review passed all 13 grid tests
+  and reported no findings. The owner accepted and committed both fixes on
+  `cleanup` in `e0a365d21ee0fbb8d118a19f8c4cada22d38b72d`.
+- **Accepted behavior:** the shared grid preserves exact cadence, partial
+  days, missing slots, and the identity of the winning source row. Timestamp
+  rejection and collision counts are available in machine-readable reports.
+  The commit also adds the public `plot_heatmap` helper and two reproducible
+  user-guide examples.
+- **Next implementation item:** DH-08 extracts private stages from
+  `DataHandler.run_pipeline` while preserving the accepted behavior,
+  including the raw heatmap after a daylight-related early exit. DH-07's
+  outcome and reset behavior is scheduled for a subsequent change.
+- **Decisions before extraction:** specify DH-07's reporting granularity and
+  unavailable-result semantics, and decide what `reset=False` may reuse.
+  Proposed defaults are one outcome per independently failing analysis, with
+  a status, reason, and elapsed time in the handler and Dask reports. Use
+  `None` for an unavailable result and reserve `False` for an assessed negative
+  result. Start a fresh result attempt before solver preflight for either reset
+  setting, with `reset=False` permitting reuse of compatible computation.
+- **Authorization:** this entry records completion and opens DH-08 for
+  specification. Source changes and verification require issue-specific
+  direction.
+
+### 2026-11-12 — DH-07 contract approved and DH-08 authorized
+
+- **DH-07 decision:** report the outcome of each independently failing
+  analysis with status, reason, and elapsed time. Preserve `False` for an
+  assessed negative finding and use `None` when the finding is unavailable.
+  Start a fresh result attempt before preflight for both reset settings.
+  `reset=False` may reuse compatible computation. The owner identified no
+  existing workflow requiring an earlier fit to be retained.
+- **DH-08 authorization:** extract ordinary private pipeline stages, verify
+  call order, option forwarding, and continuation behavior with focused tests,
+  and run the independent public-tool review. DH-07 implementation follows in
+  its own change.
+
+### 2026-11-12 — CI-01 installed-wheel smoke checks accepted
+
+- **Owner direction:** use the four proposed checks and update CI-01; no
+  implementation yet.
+- **Agreed checks:** distribution identity/imports and dependency consistency;
+  packaged-resource loading; public time transforms and headless rendering;
+  and one small CLARABEL-backed public solve with an analytic ramp solution.
+- **Execution contract:** use the exact built wheel with base dependencies in
+  a fresh isolated Linux/Python 3.12 environment in the existing build job.
+  Run outside the checkout, verify import origins, and use generated inputs and
+  installed resources. Retain the existing test matrix and separate broader
+  numerical and optional-extra validation.
+- **Authorization:** this records the smoke-check specification only. No
+  workflow, source, or test implementation, environment installation, or CI
+  execution is authorized by this update.
+
+### 2026-11-12 — Plotting and reporting extraction scoped
+
+- **Owner direction:** add plotting extraction as a separate plan item after
+  DH-08 and coordinate reporting extraction with DH-07. Update the plan only;
+  no implementation yet.
+- **DH-09:** retain thin public handler plotting methods and move rendering
+  into ordinary functions with explicit inputs. Preserve established behavior
+  and keep the existing plotting correctness issues separately scoped.
+- **DH-07:** extract report construction and formatting with the approved
+  outcome/reset work, sharing outcome interpretation across console, handler,
+  and Dask reports while keeping state ownership in `DataHandler`.
+- **Sequence and authorization:** DH-09 follows DH-08 as a separate checkpoint;
+  DH-07 follows with its behavioral and reporting changes. This does not reopen
+  or expand the reviewed DH-08 implementation, authorize source/test changes,
+  or authorize execution of the proposed checks.

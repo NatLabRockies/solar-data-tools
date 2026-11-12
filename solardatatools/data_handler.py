@@ -408,12 +408,123 @@ class DataHandler:
         self.time_axis_diagnostics = None
 
         t = np.zeros(6)
-        ######################################################################
-        # Preprocessing
-        ######################################################################
         t[0] = time()
+        progress = tqdm(desc="task list", total=7, ncols=80) if verbose else None
+        if not self._prepare_observations(
+            power_col,
+            min_val=min_val,
+            max_val=max_val,
+            start_day_ix=start_day_ix,
+            end_day_ix=end_day_ix,
+            sampling_interval=sampling_interval,
+            snap_tolerance=snap_tolerance,
+            verbose=verbose,
+            progress=progress,
+        ):
+            return
         if verbose:
-            progress = tqdm(desc="task list", total=7, ncols=80)
+            progress.update()
+        self._estimate_provisional_daylight(
+            random_seed=sunrise_sunset_random_seed,
+            solver=solver_convex,
+            verbose=verbose,
+        )
+
+        t[1] = time()
+        if verbose:
+            progress.update()
+        if not self._fill_observations(
+            zero_night=zero_night, interp_day=interp_day, verbose=verbose
+        ):
+            return
+
+        t[2] = time()
+        if verbose:
+            progress.update()
+        t_clean = self._score_and_analyze_days(
+            density_lower_threshold=density_lower_threshold,
+            density_upper_threshold=density_upper_threshold,
+            linearity_threshold=linearity_threshold,
+            clear_day_smoothness_param=clear_day_smoothness_param,
+            clear_day_energy_param=clear_day_energy_param,
+            solver=solver,
+            solver_convex=solver_convex,
+            verbose=verbose,
+        )
+
+        t[3] = time()
+        if verbose:
+            progress.update()
+        self._correct_clock_and_refresh_daylight(
+            fix_shifts=fix_shifts,
+            round_shifts_to_hour=round_shifts_to_hour,
+            time_shift_weight_change_detector=time_shift_weight_change_detector,
+            time_shift_weight_seasonal=time_shift_weight_seasonal,
+            solar_noon_estimator=solar_noon_estimator,
+            daytime_threshold=daytime_threshold,
+            periodic_detector=periodic_detector,
+            solver=solver,
+            solver_convex=solver_convex,
+            verbose=verbose,
+        )
+
+        t[4] = time()
+        if verbose:
+            progress.update()
+        self._align_extra_columns(extra_cols)
+        t[5] = time()
+        times = np.diff(t, n=1)
+        cleaning_times = np.diff(t_clean, n=1)
+        total_time = t[-1] - t[0]
+        # Cleanup
+        if verbose:
+            progress.update()
+            progress.close()
+            print("\n")
+            out = "total time: {:.2f} seconds\n"
+            out += "--------------------------------\n"
+            out += "Breakdown\n"
+            out += "--------------------------------\n"
+            out += "Preprocessing              {:.2f}s\n"
+            out += "Cleaning                   {:.2f}s\n"
+            out += "Filtering/Summarizing      {:.2f}s\n"
+            out += "    Data quality           {:.2f}s\n"
+            out += "    Clear day detect       {:.2f}s\n"
+            out += "    Clipping detect        {:.2f}s\n"
+            out += "    Capacity change detect {:.2f}s\n"
+            if extra_cols is not None:
+                out += "Extra Column Processing    {:.2f}s"
+            print(
+                out.format(
+                    total_time,
+                    times[0],
+                    times[1] + times[3],
+                    times[2],
+                    cleaning_times[0],
+                    cleaning_times[1],
+                    cleaning_times[2],
+                    cleaning_times[4],
+                    times[4],
+                )
+            )
+        self._ran_pipeline = True
+        self.total_time = total_time
+        return
+
+    def _prepare_observations(
+        self,
+        power_col,
+        *,
+        min_val,
+        max_val,
+        start_day_ix,
+        end_day_ix,
+        sampling_interval,
+        snap_tolerance,
+        verbose,
+        progress,
+    ):
+        """Establish the observation grid and record its pre-fill diagnostics."""
         if self.data_frame_raw is not None:
             # If power_col not passed, assume that the first column contains the
             # data to be processed
@@ -421,7 +532,7 @@ class DataHandler:
                 power_col = self.data_frame_raw.columns[0]
             if power_col not in self.data_frame_raw.columns:
                 print("Power column key not present in data frame.")
-                return
+                return False
             # Check that data frame has a reasonable amount of data, you can't have a reasonable time series with less
             # than 24 actual measured values. This number could probably be bumped up to be honest.
             if np.sum(self.data_frame_raw[power_col].values >= 0) < 24:
@@ -472,19 +583,19 @@ class DataHandler:
                 "time. Daylight estimates and daily analyses may be unreliable when "
                 'production crosses midnight. Inspect plot_heatmap(matrix="raw").',
                 UserWarning,
-                stacklevel=2,
+                stacklevel=3,
             )
-        # Run once to get a rough estimate. Update at the end after cleaning
-        # is finished
-        if verbose:
-            progress.update()
+        return True
+
+    def _estimate_provisional_daylight(self, *, random_seed, solver, verbose):
+        """Estimate daylight on the observation grid for filling and scoring."""
         ss = SunriseSunset()
         try:
             ss.run_optimizer(
                 self.raw_data_matrix,
-                random_seed=sunrise_sunset_random_seed,
+                random_seed=random_seed,
                 plot=False,
-                solver=solver_convex,
+                solver=solver,
             )
             self.boolean_masks.daytime = ss.sunup_mask_estimated
         except Exception:
@@ -494,12 +605,9 @@ class DataHandler:
                 print(msg)
                 traceback.print_exception(*sys.exc_info())
         self.daytime_analysis = ss
-        ######################################################################
-        # Cleaning
-        ######################################################################
-        t[1] = time()
-        if verbose:
-            progress.update()
+
+    def _fill_observations(self, *, zero_night, interp_day, verbose):
+        """Fill the observation matrix and check daylight measurement coverage."""
         try:
             self.make_filled_data_matrix(zero_night=zero_night, interp_day=interp_day)
         except Exception:
@@ -530,7 +638,7 @@ class DataHandler:
             self.data_quality_score = 0.0
             self.data_clearness_score = 0.0
             self._ran_pipeline = True
-            return
+            return False
         if ratio < 0.85:
             msg = "Error: data was lost during NaN filling procedure. "
             msg += "Check the input data and daylight estimates.\n"
@@ -543,13 +651,22 @@ class DataHandler:
             self.data_quality_score = None
             self.data_clearness_score = None
             self._ran_pipeline = True
-            return
-        ######################################################################
-        # Scoring
-        ######################################################################
-        t[2] = time()
-        if verbose:
-            progress.update()
+            return False
+        return True
+
+    def _score_and_analyze_days(
+        self,
+        *,
+        density_lower_threshold,
+        density_upper_threshold,
+        linearity_threshold,
+        clear_day_smoothness_param,
+        clear_day_energy_param,
+        solver,
+        solver_convex,
+        verbose,
+    ):
+        """Score and classify days before the optional clock correction."""
         t_clean = np.zeros(6)
         t_clean[0] = time()
         try:
@@ -620,14 +737,23 @@ class DataHandler:
                 traceback.print_exception(*sys.exc_info())
             self.capacity_changes = None
         t_clean[5] = time()
-        ######################################################################
-        # Remaining data cleaning operations
-        # Fix time shifts depends on the data clearness scoring, and the other
-        # two depend on fixing the time shifts, when then occur.
-        ######################################################################
-        t[3] = time()
-        if verbose:
-            progress.update()
+        return t_clean
+
+    def _correct_clock_and_refresh_daylight(
+        self,
+        *,
+        fix_shifts,
+        round_shifts_to_hour,
+        time_shift_weight_change_detector,
+        time_shift_weight_seasonal,
+        solar_noon_estimator,
+        daytime_threshold,
+        periodic_detector,
+        solver,
+        solver_convex,
+        verbose,
+    ):
+        """Apply the requested clock fit and refresh daylight on the resulting grid."""
         if fix_shifts:
             try:
                 self.auto_fix_time_shifts(
@@ -654,12 +780,9 @@ class DataHandler:
             self.filled_data_matrix, solver=solver_convex
         )
         self.boolean_masks.daytime = self.daytime_analysis.sunup_mask_estimated
-        ######################################################################
-        # Process Extra columns
-        ######################################################################
-        t[4] = time()
-        if verbose:
-            progress.update()
+
+    def _align_extra_columns(self, extra_cols):
+        """Align the requested extra signals and score their daylight coverage."""
         if extra_cols is not None:
             if isinstance(extra_cols, str):
                 extra_cols = np.atleast_1d(extra_cols)
@@ -667,44 +790,6 @@ class DataHandler:
                 extra_cols = [extra_cols]
             for col in extra_cols:
                 self.generate_extra_matrix(col)
-        t[5] = time()
-        times = np.diff(t, n=1)
-        cleaning_times = np.diff(t_clean, n=1)
-        total_time = t[-1] - t[0]
-        # Cleanup
-        if verbose:
-            progress.update()
-            progress.close()
-            print("\n")
-            out = "total time: {:.2f} seconds\n"
-            out += "--------------------------------\n"
-            out += "Breakdown\n"
-            out += "--------------------------------\n"
-            out += "Preprocessing              {:.2f}s\n"
-            out += "Cleaning                   {:.2f}s\n"
-            out += "Filtering/Summarizing      {:.2f}s\n"
-            out += "    Data quality           {:.2f}s\n"
-            out += "    Clear day detect       {:.2f}s\n"
-            out += "    Clipping detect        {:.2f}s\n"
-            out += "    Capacity change detect {:.2f}s\n"
-            if extra_cols is not None:
-                out += "Extra Column Processing    {:.2f}s"
-            print(
-                out.format(
-                    total_time,
-                    times[0],
-                    times[1] + times[3],
-                    times[2],
-                    cleaning_times[0],
-                    cleaning_times[1],
-                    cleaning_times[2],
-                    cleaning_times[4],
-                    times[4],
-                )
-            )
-        self._ran_pipeline = True
-        self.total_time = total_time
-        return
 
     def report(self, verbose=True, return_values=False):
         """
