@@ -7,6 +7,7 @@ This module contains functions for transforming PV power data, including time-ax
 """
 
 from datetime import timedelta
+import warnings
 import numpy as np
 import pandas as pd
 from collections import Counter
@@ -101,7 +102,7 @@ def make_time_series(
 
 
 def standardize_time_axis(
-    df, timeindex=True, power_col=None, datetimekey=None, correct_tz=True, verbose=True
+    df, timeindex=True, power_col=None, datetimekey=None, correct_tz=None, verbose=True
 ):
     """
     This function takes in a pandas data frame containing tabular time series
@@ -119,8 +120,16 @@ def standardize_time_axis(
 
     :param df: A pandas data frame containing the tabular time series data
     :param datetimekey: An optional key corresponding to the name of the column that contains the time stamps
-    :return: A new data frame with a standardized time axis
+    :param power_col: Retained for compatibility with callers of the former timezone check.
+    :param correct_tz: Deprecated. This option no longer applies a timezone correction.
+    :return: A tuple of the standardized data frame and zero for the retired offset.
     """
+    if correct_tz is not None:
+        warnings.warn(
+            "correct_tz is deprecated and no longer adjusts timestamps. Omit it.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     # convert index to timeseries
     df = df.copy()
     if not timeindex:
@@ -136,60 +145,6 @@ def standardize_time_axis(
             df.set_index(datetimekey, inplace=True)
     # make sure it's a datetime index
     df.index = pd.to_datetime(df.index)
-    # Check for "large" time zone issues (> 4 hrs off). This is to avoid power
-    # generation at midnight, which "wraps around" when forming a matrix
-    if power_col is not None:
-        thresh = 0.01
-        # calculate average day
-        s = df[power_col]
-        avg_day = s.groupby(s.index.time).mean()
-        # normalize to [0, 1]
-        avg_day -= np.min(avg_day)
-        avg_day /= np.max(avg_day)
-        # find sunrise and sunset times
-        idxs = np.arange(len(avg_day))
-        if avg_day.iloc[0] >= thresh:
-            sr_loc = [idxs[0]]
-        else:
-            sr_loc = idxs[
-                np.r_[[False], np.diff((avg_day.values >= thresh).astype(float)) == 1]
-            ]
-        if avg_day.iloc[-1] >= thresh:
-            ss_loc = [idxs[-1]]
-        else:
-            ss_loc = idxs[
-                np.r_[np.diff((avg_day.values >= thresh).astype(float)) == -1, [False]]
-            ]
-        sunrise = avg_day.index.values[sr_loc]
-        sunrise = sunrise[0].hour + sunrise[0].minute / 60  # first index
-        sunset = avg_day.index.values[ss_loc]
-        sunset = sunset[-1].hour + sunset[-1].minute / 60  # last index
-        # calculate solar noon of average day
-        if sunrise < sunset:
-            sn = np.average([sunrise, sunset])
-        else:
-            sn = np.average([sunrise, sunset + 24])
-            if sn > 24:
-                sn -= 24
-        avg_solar_noon = sn
-        sn_deviation = int(np.round(12 - avg_solar_noon))
-    else:
-        sn_deviation = 0
-    # if estimated average solar noon is more than 4 hours from clock noon,
-    # then apply a correction
-    if correct_tz and power_col is not None:
-        if np.abs(sn_deviation) > 4:
-            df.index = df.index.shift(sn_deviation, freq="h")
-        else:
-            sn_deviation = 0
-    else:
-        if np.abs(sn_deviation) > 4:
-            m1 = "CAUTION: Time zone offset error detected, "
-            m1 += "but TZ correction flag turned off!\n"
-            m1 += "Recommend checking timezone localization in data or "
-            m1 += "turning on TZ correction flag."
-            print(m1)
-        sn_deviation = 0
     # determine most common sampling frequency
     try:
         diff = (df.index[1:] - df.index[:-1]).seconds
@@ -249,7 +204,7 @@ def standardize_time_axis(
         df = df.loc[df.index.notnull()].reindex(
             index=time_index, method="nearest", limit=1
         )
-    return df, sn_deviation
+    return df, 0
 
 
 def fix_daylight_savings_with_known_tz(df, tz="America/Los_Angeles", inplace=False):

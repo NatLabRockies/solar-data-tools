@@ -46,6 +46,34 @@ def detect_sun(data, threshold):
     return bool_msk
 
 
+def _check_midnight_production(data):
+    """Check observed production at interior midnights, or return None if unassessed."""
+    samples_per_day = data.shape[0]
+    hours = 24 * np.arange(samples_per_day) / samples_per_day
+    # Pair the last hour of each day with the first hour of the following day.
+    before = data[hours >= 23, :-1]
+    after = data[hours < 1, 1:]
+    if before.shape[0] == 0 or after.shape[0] == 0:
+        return None
+    finite_before = np.isfinite(before)
+    finite_after = np.isfinite(after)
+    eligible = (2 * finite_before.sum(axis=0) >= before.shape[0]) & (
+        2 * finite_after.sum(axis=0) >= after.shape[0]
+    )
+    eligible_count = np.count_nonzero(eligible)
+    if eligible_count < 3:
+        return None
+    positive = data[np.isfinite(data) & (data > 0)]
+    if positive.size == 0:
+        return None
+    threshold = 0.05 * np.quantile(positive, 0.95)
+    producing = np.any(finite_before & (before > threshold), axis=0) | np.any(
+        finite_after & (after > threshold), axis=0
+    )
+    producing_count = np.count_nonzero(eligible & producing)
+    return bool(producing_count >= 3 and 10 * producing_count >= eligible_count)
+
+
 def scale_data(data, return_metrics=False):
     high_val = np.nanquantile(data, 0.99)
     low_val = max(np.nanmin(data), -0.005 * high_val)

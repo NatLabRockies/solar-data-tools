@@ -18,9 +18,8 @@ Most users will only need to interact with the `DataHandler` class. To instantia
 object takes a DataFrame containing the power data timeseries (with a timestamps and power columns)
 as an input. Note that the DataFrame must have a DatetimeIndex, or the user must set the `datetime_col` kwarg.
 
-The timestamps are recommended to be in the local timezone of the data. If there is a small shift in the timestamps,
-the pipeline will attempt to correct it. If the shift is large (8-10 hours), the pipeline will likely fail to
-adjust the shift.
+Supply timestamps in the site's local standard time. The pipeline warns when
+recurring production near midnight suggests a possible timezone misalignment.
 
 Let's say we have a CSV file with power data that we want to analyze. We can load it into a DataFrame:
 
@@ -152,8 +151,8 @@ before calling the `plot_time_shift_analysis_results` method.
 Set `periodic_detector=True` to require exact 365-day recurrence of the
 clock-shift component.
 
-With `correct_tz=False`, `raw_data_matrix` and `boolean_masks.missing_values`
-stay on the observation clock, the standardized grid before relative correction.
+`raw_data_matrix` and `boolean_masks.missing_values` stay on the observation
+clock, the standardized grid before relative correction.
 `corrected_observed_matrix` applies the relative correction to observations and
 their NaNs. Time dilation, PV quantile fitting, and Bundt plots use those
 observations with daylight bounds on the same corrected clock. In `PVQuantiles`,
@@ -165,8 +164,31 @@ correction. Fitted quantiles can be defined where observations are missing.
 default `input_clock="corrected"` reverses the applied relative correction. For
 an observation-clock mask, pass `input_clock="observation"`, for example
 `dh.augment_data_frame(dh.boolean_masks.missing_values, "missing", input_clock="observation")`.
-Daily masks use dates in either case. The legacy timezone correction can also
-shift the raw matrix when `correct_tz=True`.
+Daily masks use dates in either case.
+
+### Timezone advisory and migration
+
+`run_pipeline` checks observed values before filling and relative clock
+correction. It warns when power exceeds 5% of the 95th percentile of positive
+observations within an hour of midnight on at least three midnights and at
+least 10% of eligible midnights. A midnight is eligible when at least half the
+expected samples in each of `[23:00, 24:00)` and `[00:00, 01:00)` are finite.
+For timestamped input, the check counts a grid sample only if its source
+observation is less than half a sampling interval away.
+The report field `possible timezone misalignment` is `True` for a warning,
+`False` when the check finds no evidence, and `None` when the check is
+unassessed due to insufficient coverage or lack of a positive reference.
+Daylight estimates and daily analyses can be unreliable when production
+crosses midnight. Check the source timezone and localize explicitly if needed.
+If later pipeline stages cannot produce a report, the advisory remains
+available on `dh.possible_timezone_misalignment`. Use
+`dh.plot_heatmap(matrix="raw")` to inspect the observations and their gaps
+even if the daylight analysis cannot proceed.
+
+Omit the deprecated `correct_tz` argument. During the transition, both
+boolean values are accepted and neither shifts the data or controls the
+advisory. `standardize_time_axis` still returns `(frame, 0)`, and the legacy
+`time zone correction` report field is always zero.
 
 Examples of some of these plotting methods are shown below in the notebooks and examples section,
 such as the [demo](getting_started/notebooks/demo_default.nblink) and the

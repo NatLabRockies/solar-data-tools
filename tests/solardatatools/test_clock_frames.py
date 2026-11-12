@@ -51,7 +51,6 @@ def test_pipeline_keeps_clock_frames_aligned(monkeypatch, periodic_detector):
     recurrence = {"periodic_detector": True} if periodic_detector else {}
     dh.run_pipeline(
         fix_shifts=True,
-        correct_tz=False,
         extra_cols="sensor",
         verbose=False,
         **recurrence,

@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import traceback
 import sys
+import warnings
 from tqdm import tqdm
 from solardatatools._units import ENERGY_TO_WH, POWER_TO_W, unit_scale
 from solardatatools.time_axis_manipulation import (
@@ -33,7 +34,7 @@ from solardatatools.data_quality import (
 from solardatatools.data_filling import zero_nighttime, interp_missing
 from solardatatools.clear_day_detection import ClearDayDetection
 from solardatatools.plotting import plot_2d, plot_bundt_cake
-from solardatatools.solar_noon import avg_sunrise_sunset
+from solardatatools.daytime import _check_midnight_production
 from solardatatools.polar_transform import PolarTransform
 from solardatatools.algorithms import (
     CapacityChange,
@@ -70,9 +71,9 @@ class DataHandler:
 
         It is initialized by passing a Pandas dataframe to the `data_frame` parameter. Note that
         the DataFrame must have a DatetimeIndex or the user must set the `datetime_col` kwarg.
-        The timestamps are recommended to be in the local timezone of the data. If there is a small shift
-        in the timestamps, the pipeline will attempt to correct it. If the shift is large (8-10 hours), the pipeline
-        will likely fail to adjust the shift.
+        Supply timestamps in the site's local standard time. The pipeline
+        warns about significant production near midnight. Relative clock-shift
+        correction is available through ``run_pipeline(fix_shifts=True)``.
 
 
         :param data_frame: A pandas DataFrame containing the raw data. If provided,
@@ -186,8 +187,9 @@ class DataHandler:
         self.normal_quality_scores = None
         # True if time shifts detected and corrected in data set
         self.time_shifts = None
-        # TZ correction factor (determined during pipeline run)
+        # Keep the retired correction field at zero during the API transition.
         self.tz_correction = 0
+        self.possible_timezone_misalignment = None
         # Daily scores (floats), flags (booleans), and boolean masks
         self.daily_scores = DailyScores()  # 1D arrays of floats
         self.daily_flags = DailyFlags()  # 1D arrays of Booleans
@@ -214,8 +216,6 @@ class DataHandler:
         self.__density_lower_threshold = None
         self.__density_upper_threshold = None
         self.__linearity_threshold = None
-        self.__recursion_depth = 0
-        self.__initial_time = None
         self.__fix_dst_ran = False
 
     def run_pipeline(
@@ -239,7 +239,7 @@ class DataHandler:
         time_shift_weight_seasonal=1e-3,
         periodic_detector=False,
         solar_noon_estimator="srss",
-        correct_tz=True,
+        correct_tz=None,
         extra_cols=None,
         sunrise_sunset_random_seed=42,
         daytime_threshold=0.005,
@@ -304,8 +304,8 @@ class DataHandler:
         :param solar_noon_estimator: Method to estimate solar noon. Options include
                                      "srss" (sunrise/sunset).
         :type solar_noon_estimator: str, default="srss"
-        :param correct_tz: Whether to correct for timezone offsets in the data.
-        :type correct_tz: bool, default=True
+        :param correct_tz: Deprecated. This option no longer applies a timezone correction.
+        :type correct_tz: bool, optional
         :param extra_cols: Additional columns to process, typically containing extra
                            data features.
         :type extra_cols: str, tuple, or list, optional
@@ -326,12 +326,17 @@ class DataHandler:
 
         :note:
             If using the MOSEK solver, ensure that a valid license is available.
-            With ``correct_tz=False``, ``raw_data_matrix`` and
-            ``boolean_masks.missing_values`` stay on the observation clock
-            during relative clock correction. The legacy timezone correction
-            can also shift the raw matrix when enabled.
+            ``raw_data_matrix`` and ``boolean_masks.missing_values`` stay on
+            the observation clock during relative clock correction. The
+            timezone advisory is based on the observed data before filling.
         """
 
+        if correct_tz is not None:
+            warnings.warn(
+                "correct_tz is deprecated and no longer adjusts timestamps. Omit it.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if verbose:
             print(
                 """
@@ -379,8 +384,8 @@ class DataHandler:
         self.extra_matrices = {}  # Matrix views of extra columns
         self.extra_quality_scores = {}
         self.power_units = units
-        if self.__recursion_depth == 0:
-            self.tz_correction = 0
+        self.tz_correction = 0
+        self.possible_timezone_misalignment = None
 
         t = np.zeros(6)
         ######################################################################
@@ -404,16 +409,11 @@ class DataHandler:
                     "Insufficient data to run pipeline. Please check your data frame."
                 )
             # Pandas operations to make a time axis with regular intervals.
-            # If correct_tz is True, it will also align the median daily maximum
-            self.data_frame, sn_deviation = standardize_time_axis(
+            self.data_frame, _ = standardize_time_axis(
                 self.data_frame_raw,
                 timeindex=True,
-                power_col=power_col,
-                correct_tz=correct_tz,
                 verbose=verbose,
             )
-            if correct_tz:
-                self.tz_correction = sn_deviation
         if verbose:
             progress.update()
         # Embed the data as a matrix, with days in columns. Also, set some
@@ -439,6 +439,16 @@ class DataHandler:
                 self.raw_data_matrix[slct] = np.nan
         self.capacity_estimate = np.nanquantile(self.raw_data_matrix, 0.95)
         self.boolean_masks.missing_values = np.isnan(self.raw_data_matrix)
+        self.possible_timezone_misalignment = self._check_timezone_misalignment()
+        if self.possible_timezone_misalignment:
+            warnings.warn(
+                "Significant production near midnight suggests a possible timezone "
+                "misalignment. Check that timestamps are in the site's local standard "
+                "time. Daylight estimates and daily analyses may be unreliable when "
+                'production crosses midnight. Inspect plot_heatmap(matrix="raw").',
+                UserWarning,
+                stacklevel=2,
+            )
         # Run once to get a rough estimate. Update at the end after cleaning
         # is finished
         if verbose:
@@ -486,7 +496,7 @@ class DataHandler:
         if num_raw_measurements > 0:
             ratio = num_filled_measurements / num_raw_measurements
         else:
-            msg = "Error: data set contains no non-zero values!"
+            msg = "Error: no nonzero observations within the estimated daylight window."
             self._error_msg += "\n" + msg
             if verbose:
                 print(msg)
@@ -498,8 +508,7 @@ class DataHandler:
             return
         if ratio < 0.85:
             msg = "Error: data was lost during NaN filling procedure. "
-            msg += "This typically occurs when\nthe time stamps are in the "
-            msg += "wrong timezone. Please double check your data table.\n"
+            msg += "Check the input data and daylight estimates.\n"
             self._error_msg += "\n" + msg
             if verbose:
                 print(msg)
@@ -615,31 +624,6 @@ class DataHandler:
                     traceback.print_exception(*sys.exc_info())
                 self.time_shifts = None
 
-        # check for remaining TZ offset issues
-        if correct_tz:
-            average_noon = np.nanmean(
-                avg_sunrise_sunset(self.filled_data_matrix, threshold=0.01)
-            )
-            tz_offset = int(np.round(12 - average_noon))
-            if np.abs(tz_offset) > 1:
-                self.tz_correction += tz_offset
-                # Related to this bug fix:
-                # https://github.com/NatLabRockies/solar-data-tools/commit/ae0037771c09ace08bff5a4904475da606e934da
-                old_index = self.data_frame.index.copy()
-                self.data_frame.index = self.data_frame.index.shift(tz_offset, freq="h")
-                self.data_frame = self.data_frame.reindex(
-                    index=old_index, method="nearest", limit=1
-                ).fillna(0)
-                meas_per_hour = self.filled_data_matrix.shape[0] / 24
-                roll_by = int(meas_per_hour * tz_offset)
-                self.filled_data_matrix = np.nan_to_num(
-                    np.roll(self.filled_data_matrix, roll_by, axis=0), 0
-                )
-                self.raw_data_matrix = np.roll(self.raw_data_matrix, roll_by, axis=0)
-                self.boolean_masks.daytime = np.roll(
-                    self.boolean_masks.daytime, roll_by, axis=0
-                )
-
         # Update daytime detection based on cleaned up data
         self.daytime_analysis.calculate_times(
             self.filled_data_matrix, solver=solver_convex
@@ -669,18 +653,10 @@ class DataHandler:
         cleaning_times = np.diff(t_clean, n=1)
         total_time = t[-1] - t[0]
         # Cleanup
-        self.__recursion_depth = 0
         if verbose:
             progress.update()
             progress.close()
             print("\n")
-            if self.__initial_time is not None:
-                restart_msg = (
-                    "{:.2f} seconds spent automatically localizing the time zone\n"
-                )
-                restart_msg += "Info for last pipeline run below:\n"
-                restart_msg = restart_msg.format(t[0] - self.__initial_time)
-                print(restart_msg)
             out = "total time: {:.2f} seconds\n"
             out += "--------------------------------\n"
             out += "Breakdown\n"
@@ -716,7 +692,8 @@ class DataHandler:
         Generate a report summarizing key metrics from the pipeline analysis.
 
         The report includes metrics such as the data set length, data sampling rate,
-        quality scores, inverter clipping, and any detected capacity changes, time shift or time zone corrections.
+        quality scores, inverter clipping, capacity changes, relative clock
+        corrections, and a possible timezone misalignment advisory.
         The function can either print this report or return it as a dictionary.
 
         :param verbose:
@@ -741,7 +718,9 @@ class DataHandler:
             - "capacity change": Whether capacity changes were detected.
             - "data quality warning": Warnings regarding data quality.
             - "time shift correction": Whether any time shifts that were corrected.
-            - "time zone correction": The amount of time zone correction applied.
+            - "time zone correction": Always zero during the compatibility transition.
+            - "possible timezone misalignment": True when the midnight check flags
+              production, False when it finds no evidence, or None when unassessed.
 
             The dictionary is returned only if `return_values` is True.
         :rtype: dict, optional
@@ -775,7 +754,8 @@ class DataHandler:
                 "time shift correction": (
                     self.time_shifts if self.time_shifts is not None else False
                 ),
-                "time zone correction": self.tz_correction,
+                "time zone correction": 0,
+                "possible timezone misalignment": self.possible_timezone_misalignment,
             }
         except TypeError:
             if self._ran_pipeline:
@@ -802,6 +782,10 @@ class DataHandler:
                 print("Please run the pipeline first!")
                 return
         if verbose:
+            timezone_advisory = report["possible timezone misalignment"]
+            timezone_status = (
+                "not assessed" if timezone_advisory is None else timezone_advisory
+            )
             pout = f"""
 -----------------
 DATA SET REPORT
@@ -816,7 +800,7 @@ clipped fraction     {report["clipped fraction"]:.2f}
 capacity changes     {report["capacity change"]}
 data quality warning {report["data quality warning"]}
 time shift errors    {report["time shift correction"]}
-time zone errors     {report["time zone correction"] != 0}
+possible timezone misalignment  {timezone_status}
             """
             print(pout)
         if return_values:
@@ -1092,6 +1076,19 @@ time zone errors     {report["time zone correction"] != 0}
         self.data_frame = self.data_frame[d1:d2]
         self.start_doy = self.day_index.dayofyear[0]
         return
+
+    def _check_timezone_misalignment(self):
+        data = self.raw_data_matrix
+        if self.data_frame is not None:
+            # Nearest-neighbor standardization can copy a source row into a
+            # missing slot. Count only matches strictly within half a sample.
+            source_rows = self.data_frame_raw[self.seq_index_key].dropna()
+            source_times = pd.Series(source_rows.index, index=source_rows.to_numpy())
+            measured_at = self.data_frame[self.seq_index_key].map(source_times)
+            half_step = pd.Timedelta(days=1) / (2 * data.shape[0])
+            observed = (abs(measured_at - self.data_frame.index) < half_step).to_numpy()
+            data = np.where(observed.reshape(data.shape, order="F"), data, np.nan)
+        return _check_midnight_production(data)
 
     def make_filled_data_matrix(self, zero_night=True, interp_day=True):
         self.filled_data_matrix = np.copy(self.raw_data_matrix)

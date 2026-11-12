@@ -221,8 +221,7 @@ if __name__ == "__main__":
     :param output_file: Absolute path to csv file containing report results.
     :param fix_time_shits: String, 'True' or 'False'. Specifies if time shifts are to be
     fixed when running the pipeline.
-    :param time_zone_correction: String, 'True' or 'False'. Specifies if the time zone correction is performed when
-    running the pipeline.
+    :param time_zone_correction: Retired flag retained for compatibility.
     :param check_json: String, 'True' or 'False'. Check json file for location information.
     :param convert_to_ts: String, 'True' or 'False'. Specifies if conversion to time series is performed when
     running the pipeline.

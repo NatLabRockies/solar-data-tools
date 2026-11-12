@@ -37,9 +37,7 @@ def run_pipeline(monkeypatch):
         power = np.tile(profile, 12)
         index = pd.date_range("2024-01-01", periods=len(power), freq="h")
         dh = DataHandler(pd.DataFrame({"power": power}, index=index))
-        dh.run_pipeline(
-            correct_tz=False, linearity_threshold=0.5, verbose=False, **kwargs
-        )
+        dh.run_pipeline(linearity_threshold=0.5, verbose=False, **kwargs)
         return dh, profile
 
     return run
