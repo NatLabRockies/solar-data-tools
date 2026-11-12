@@ -69,7 +69,7 @@ def test_midnight_rule_requires_finite_observations_on_both_sides():
     assert _check_midnight_production(np.ones((12, 5))) is None
 
 
-def test_copied_midnight_slots_do_not_supply_advisory_coverage(monkeypatch):
+def test_missing_midnight_slots_do_not_supply_advisory_coverage(monkeypatch):
     hours = np.arange(24)
     profile = 1000 * np.maximum(np.sin(np.pi * (hours - 6) / 12), 0)
     timestamps = pd.date_range("2024-01-01", periods=24 * 12, freq="h")
@@ -81,8 +81,7 @@ def test_copied_midnight_slots_do_not_supply_advisory_coverage(monkeypatch):
 
     handler.run_pipeline(verbose=False, linearity_threshold=0.5)
 
-    # Standardization currently copies the adjacent observations into those slots.
-    assert np.isfinite(handler.raw_data_matrix[[0, -1]]).all()
+    assert np.isnan(handler.raw_data_matrix[[0, -1]]).all()
     assert handler.possible_timezone_misalignment is None
 
 

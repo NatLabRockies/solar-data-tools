@@ -101,6 +101,38 @@ for creating a summary table of all data sets.
 dh.report(return_values=True, verbose=False)
 ```
 
+### Sampling intervals and timestamp snapping
+
+Use an exact fixed sampling interval that divides a 24-hour day, such as
+`sampling_interval="500ms"` or `sampling_interval="90s"`. When omitted,
+`run_pipeline` and `standardize_time_axis` use fixed frequency metadata or
+infer a clear cadence from the timestamps. For mixed or ambiguous spacings,
+provide the interval or split the record. Supply local standard time and
+normalize timezone-aware data that span an offset change before processing.
+
+For jittered input, inference looks for one supported cadence with at least
+three adjacent gaps and a strict majority of gaps within 2% of that cadence.
+The median displacement from the midnight grid must also be within a quarter
+of the cadence. A sustained run of similar gaps at another spacing requires
+an explicit interval or a split record.
+
+Each source row can fill its nearest grid slot within `snap_tolerance`,
+which defaults to half the interval, inclusive. A halfway tie goes to the
+earlier slot. When rows compete for a slot, the closest whole row wins, with
+source order breaking ties. Omitted slots and the unobserved parts of partial
+days are NaN. A final accepted snap to the following midnight adds that date
+to the grid. `make_2d` embeds aligned data and retains its explicit day trim
+options and its trimming of fully missing edge days for the selected column.
+
+`standardize_time_axis(..., return_diagnostics=True)` returns
+`(frame, 0, diagnostics)` with the resolved interval and the rejected and
+colliding source rows, identified by zero-based input position. With the
+default, the return remains `(frame, 0)`. `DataHandler` retains the diagnostics
+as `time_axis_diagnostics`. The report's `timestamp rejection count` includes
+collision losers, and `timestamp collision count` counts affected grid slots.
+These counts describe standardization before analysis-day selection. The
+report's `sampling` stays in minutes, including fractional minutes.
+
 ### Power and energy units
 
 `run_pipeline` assumes watts unless you specify `units="kW"`. If your
@@ -193,6 +225,104 @@ advisory. `standardize_time_axis` still returns `(frame, 0)`, and the legacy
 Examples of some of these plotting methods are shown below in the notebooks and examples section,
 such as the [demo](getting_started/notebooks/demo_default.nblink) and the
 [tutorial](getting_started/notebooks/tutorial.ipynb).
+
+## Plotting a generic time series
+
+The top-level `plot_heatmap` function standardizes timestamps and plots one
+column per day, with missing samples left blank. Pass a pandas Series or a
+DataFrame with a `DatetimeIndex`. For a DataFrame with multiple columns, use
+`key` to select the signal. The optional `units` argument labels the colorbar.
+Nonnegative data use `plasma`. If any plotted value is negative, the function
+uses `seismic` with symmetric limits around zero.
+
+Run this shared setup before the examples. The formatter adds titles, time
+zone labels, and year ticks to the returned Matplotlib figures.
+
+```python
+from urllib.parse import urlencode
+
+import matplotlib.dates as mdates
+import pandas as pd
+
+from solardatatools import plot_heatmap
+
+
+def label_heatmap(fig, title, clock):
+    fig.subplots_adjust(left=0.095, bottom=0.15, top=0.86, right=0.98)
+    ax = fig.axes[0]
+    ax.set_title(title, loc="left", fontweight="bold", fontsize=16, pad=12)
+    ax.set_ylabel(f"Time of day ({clock})")
+    ax.xaxis.set_major_locator(mdates.YearLocator(tz="UTC"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y", tz="UTC"))
+    ax.set_xlabel("Year")
+```
+
+### France electricity demand (nonnegative)
+
+Hourly demand from January 2015 through September 2020 shows higher winter
+demand and a recurring evening peak. The color scale includes one reported
+158 GW reading. The next-highest reading is 94.5 GW.
+[Open Power System Data, 2020-10-06 release](https://data.open-power-system-data.org/time_series/2020-10-06)
+
+![Hourly electricity demand in France, showing higher demand in winter and recurring evening peaks](images/france-electricity-demand.png)
+
+```python
+url = (
+    "https://data.open-power-system-data.org/time_series/2020-10-06/"
+    "time_series_60min_singleindex.csv"
+)
+load_key = "FR_load_actual_entsoe_transparency"
+power = pd.read_csv(url, usecols=["utc_timestamp", load_key])
+power.index = pd.to_datetime(power["utc_timestamp"], utc=True)
+load_gw = power[load_key].dropna() / 1000
+
+fig = plot_heatmap(load_gw, sampling_interval="1h", units="GW", figsize=(12, 4.2))
+label_heatmap(fig, "France electricity demand", "UTC")
+fig.savefig("france-electricity-demand.png", dpi=150, facecolor="white")
+```
+
+### San Francisco water level (signed)
+
+Verified hourly readings from 2017 through 2020 show high and low tides
+shifting through the day. Zero is mean sea level, with red above it and blue
+below it. The API returns timestamps in Pacific Standard Time throughout
+the year when requested with `time_zone="lst"`.
+[NOAA tide gauge 9414290](https://tidesandcurrents.noaa.gov/stationhome.html?id=9414290) ·
+[NOAA data API](https://api.tidesandcurrents.noaa.gov/api/dev/)
+
+![Hourly water level in San Francisco, with alternating red and blue bands above and below mean sea level](images/san-francisco-water-level.png)
+
+```python
+api = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+annual_heights = []
+for year in range(2017, 2021):
+    query = urlencode(
+        {
+            "begin_date": f"{year}0101",
+            "end_date": f"{year}1231",
+            "station": "9414290",
+            "product": "hourly_height",
+            "datum": "MSL",
+            "time_zone": "lst",
+            "units": "metric",
+            "application": "solar-data-tools",
+            "format": "csv",
+        }
+    )
+    annual = pd.read_csv(f"{api}?{query}", skipinitialspace=True)
+    annual.index = pd.to_datetime(annual["Date Time"])
+    annual_heights.append(annual["Water Level"])
+
+height_m = pd.concat(annual_heights)
+fig = plot_heatmap(
+    height_m,
+    sampling_interval="1h",
+    units="m relative to mean sea level",
+    figsize=(12, 4.2),
+)
+label_heatmap(fig, "San Francisco water level", "PST")
+fig.savefig("san-francisco-water-level.png", dpi=150, facecolor="white")
+```
 
 ## Running loss factor analysis
 

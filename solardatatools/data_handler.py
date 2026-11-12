@@ -6,7 +6,6 @@ This module contains a class for managing a data processing pipeline
 """
 
 from time import time
-from datetime import timedelta
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -18,11 +17,16 @@ import traceback
 import sys
 import warnings
 from tqdm import tqdm
+from solardatatools._time_grid import (
+    DAY,
+    calendar_grid,
+    resolve_cadence,
+    wall_clock_index,
+)
 from solardatatools._units import ENERGY_TO_WH, POWER_TO_W, unit_scale
 from solardatatools.time_axis_manipulation import (
     make_time_series,
     standardize_time_axis,
-    remove_index_timezone,
     get_index_timezone,
 )
 from solardatatools.matrix_embedding import make_2d
@@ -130,28 +134,35 @@ class DataHandler:
                     e = "Data frame must have a DatetimeIndex or"
                     e += "the user must set the datetime_col kwarg."
                     raise ValueError(e)
+            wall_index = wall_clock_index(self.data_frame_raw.index)
             self.tz_info = get_index_timezone(self.data_frame_raw)
-            self.data_frame_raw = remove_index_timezone(self.data_frame_raw)
+            self.data_frame_raw.index = wall_index
             if no_future_dates:
                 now = datetime.now()
                 self.data_frame_raw = self.data_frame_raw[
-                    self.data_frame_raw.index <= now
+                    self.data_frame_raw.index.isna()
+                    | (self.data_frame_raw.index <= now)
                 ]
             self.data_frame = None
             if aggregate is not None:
                 new_data = how(self.data_frame_raw.resample(aggregate))
+                new_data[self.seq_index_key] = np.arange(len(new_data))
                 self.data_frame_raw = new_data
         else:
             self.data_frame_raw = None
             self.data_frame = None
             self.keys = None
         self.raw_data_matrix = raw_data_matrix
+        self.sampling_interval = None
         if self.raw_data_matrix is not None:
+            rows = self.raw_data_matrix.shape[0]
+            if rows == 0 or DAY.value % rows:
+                raise ValueError(
+                    "Raw matrix rows must represent a fixed sampling interval that divides a day."
+                )
             self.num_days = self.raw_data_matrix.shape[1]
-            if self.raw_data_matrix.shape[0] <= 1400:
-                self.data_sampling = int(24 * 60 / self.raw_data_matrix.shape[0])
-            else:
-                self.data_sampling = 24 * 60 / self.raw_data_matrix.shape[0]
+            self.sampling_interval = pd.Timedelta(DAY.value // rows, unit="ns")
+            self.data_sampling = 1440 / rows
         else:
             self.num_days = None
             self.data_sampling = None
@@ -190,6 +201,7 @@ class DataHandler:
         # Keep the retired correction field at zero during the API transition.
         self.tz_correction = 0
         self.possible_timezone_misalignment = None
+        self.time_axis_diagnostics = None
         # Daily scores (floats), flags (booleans), and boolean masks
         self.daily_scores = DailyScores()  # 1D arrays of floats
         self.daily_flags = DailyFlags()  # 1D arrays of Booleans
@@ -247,6 +259,9 @@ class DataHandler:
         solver="CLARABEL",
         solver_convex="CLARABEL",
         reset=True,
+        *,
+        sampling_interval=None,
+        snap_tolerance=None,
     ):
         """
         Runs the main Solar Data Tools pipeline.
@@ -320,6 +335,10 @@ class DataHandler:
         :type solver_convex: str, default="CLARABEL"
         :param reset: Whether to reset the pipeline's internal state before running.
         :type reset: bool, default=True
+        :param sampling_interval: Fixed duration for the observation grid. If
+                                  omitted, use the timestamp cadence.
+        :param snap_tolerance: Maximum allowed timestamp displacement, inclusive.
+                               Defaults to half the sampling interval.
 
         :return: None
         :rtype: NoneType
@@ -386,6 +405,7 @@ class DataHandler:
         self.power_units = units
         self.tz_correction = 0
         self.possible_timezone_misalignment = None
+        self.time_axis_diagnostics = None
 
         t = np.zeros(6)
         ######################################################################
@@ -409,10 +429,13 @@ class DataHandler:
                     "Insufficient data to run pipeline. Please check your data frame."
                 )
             # Pandas operations to make a time axis with regular intervals.
-            self.data_frame, _ = standardize_time_axis(
+            self.data_frame, _, self.time_axis_diagnostics = standardize_time_axis(
                 self.data_frame_raw,
                 timeindex=True,
                 verbose=verbose,
+                sampling_interval=sampling_interval,
+                snap_tolerance=snap_tolerance,
+                return_diagnostics=True,
             )
         if verbose:
             progress.update()
@@ -439,7 +462,9 @@ class DataHandler:
                 self.raw_data_matrix[slct] = np.nan
         self.capacity_estimate = np.nanquantile(self.raw_data_matrix, 0.95)
         self.boolean_masks.missing_values = np.isnan(self.raw_data_matrix)
-        self.possible_timezone_misalignment = self._check_timezone_misalignment()
+        self.possible_timezone_misalignment = _check_midnight_production(
+            self.raw_data_matrix
+        )
         if self.possible_timezone_misalignment:
             warnings.warn(
                 "Significant production near midnight suggests a possible timezone "
@@ -636,18 +661,12 @@ class DataHandler:
         if verbose:
             progress.update()
         if extra_cols is not None:
-            freq = int(self.data_sampling * 60)
-            new_index = pd.date_range(
-                start=self.day_index[0].date(),
-                end=self.day_index[-1].date() + timedelta(days=1),
-                freq="{}s".format(freq),
-            )[:-1]
             if isinstance(extra_cols, str):
                 extra_cols = np.atleast_1d(extra_cols)
             elif isinstance(extra_cols, tuple):
                 extra_cols = [extra_cols]
             for col in extra_cols:
-                self.generate_extra_matrix(col, new_index=new_index)
+                self.generate_extra_matrix(col)
         t[5] = time()
         times = np.diff(t, n=1)
         cleaning_times = np.diff(t_clean, n=1)
@@ -711,6 +730,8 @@ class DataHandler:
             - "length": The length of the data set in years.
             - "capacity": The estimated capacity in kW, or None for custom signal units.
             - "sampling": The data sampling rate in minutes.
+            - "timestamp rejection count": Unassigned input rows, including collision losers.
+            - "timestamp collision count": Grid slots with competing rows.
             - "quality score": The overall data quality score.
             - "clearness score": The clearness score of the data.
             - "inverter clipping": Whether inverter clipping was detected.
@@ -738,10 +759,13 @@ class DataHandler:
             capacity = capacity * unit_scale(capacity_units, "kW", POWER_TO_W)
             capacity_units = "kW"
         try:
+            timing = self.time_axis_diagnostics or {}
             report = {
                 "length": self.num_days / 365,
                 "capacity": capacity if capacity_units == "kW" else None,
                 "sampling": self.data_sampling,
+                "timestamp rejection count": timing.get("rejection_count"),
+                "timestamp collision count": timing.get("collision_count"),
                 "quality score": self.data_quality_score,
                 "clearness score": self.data_clearness_score,
                 "inverter clipping": self.inverter_clipping,
@@ -1009,86 +1033,52 @@ possible timezone misalignment  {timezone_status}
         if isinstance(self.data_frame.columns, pd.MultiIndex):
             num_levels = len(self.data_frame.columns.levels)
             column_name = tuple([column_name] * num_levels)
-        # If this column has been created previously, overwrite it
-        if column_name in self.data_frame_raw.columns:
-            del self.data_frame_raw[column_name]
-        if column_name in self.data_frame.columns:
-            del self.data_frame[column_name]
-        # Check if we have a daily bix or a sub-daily bix
-        m, n = self.raw_data_matrix.shape
-        index_shape = boolean_index.shape
-        # sub-daily
-        cond1 = index_shape == (m, n)
-        # daily
-        cond2 = index_shape == (n,)
-        if not cond1 and not cond2:
-            print("Boolean index shape does not match the data.")
-        elif cond1:
+        if column_name == self.seq_index_key:
+            raise ValueError("The source-row identifier is reserved.")
+        rows, days = self.raw_data_matrix.shape
+        mask = np.asarray(boolean_index, dtype=bool)
+        if mask.shape == (rows, days):
             if input_clock == "corrected" and self.time_shifts:
-                ts = self.time_shift_analysis
-                boolean_index = ts.invert_corrections(boolean_index)
-            start = self.day_index[0]
-            freq = "{}min".format(self.data_sampling)
-            periods = self.filled_data_matrix.size
-            tindex = pd.date_range(start=start, freq=freq, periods=periods)
-            series = pd.Series(data=boolean_index.ravel(order="F"), index=tindex)
-            series.name = column_name
-            if column_name in self.data_frame.columns:
-                del self.data_frame[column_name]
-            self.data_frame = self.data_frame.join(series)
-            self.data_frame[column_name] = self.data_frame[column_name].fillna(False)
-        elif cond2:
-            slct_dates = self.day_index[boolean_index].date
-            bix = np.isin(self.data_frame.index.date, slct_dates)
-            self.data_frame[column_name] = False
-            self.data_frame.loc[bix, column_name] = True
-
-        temp = (self.data_frame[[column_name, self.seq_index_key]]).copy()
-        temp = temp.dropna()
-        old_index = self.data_frame_raw.index
-        old_col = self.data_frame_raw[self.seq_index_key]
-        self.data_frame_raw = self.data_frame_raw.set_index(self.seq_index_key)
-        temp = temp.set_index(self.seq_index_key)
-        self.data_frame_raw = pd.merge(
-            self.data_frame_raw, temp, left_index=True, right_index=True, how="left"
-        )
-        self.data_frame_raw = self.data_frame_raw[
-            ~self.data_frame_raw.index.duplicated()
+                mask = self.time_shift_analysis.invert_corrections(mask)
+            flags = mask.ravel(order="F")
+        elif mask.shape == (days,):
+            flags = np.repeat(mask, rows)
+        else:
+            print("Boolean index shape does not match the data.")
+            return
+        self.data_frame[column_name] = flags
+        accepted = self.data_frame[self.seq_index_key].notna()
+        source_flags = self.data_frame.loc[accepted].set_index(self.seq_index_key)[
+            column_name
         ]
-        self.data_frame_raw.index = old_index
-        self.data_frame_raw[self.seq_index_key] = old_col
+        self.data_frame_raw[column_name] = self.data_frame_raw[self.seq_index_key].map(
+            source_flags
+        )
 
     def make_data_matrix(self, use_col=None, start_day_ix=None, end_day_ix=None):
         df = self.data_frame
         if use_col is None:
             use_col = df.columns[0]
-        self.raw_data_matrix, day_index = make_2d(df, key=use_col, return_day_axis=True)
-        self.raw_data_matrix = self.raw_data_matrix[:, start_day_ix:end_day_ix]
-        self.num_days = self.raw_data_matrix.shape[1]
-        if self.raw_data_matrix.shape[0] <= 1400:
-            self.data_sampling = int(24 * 60 / self.raw_data_matrix.shape[0])
-        else:
-            self.data_sampling = 24 * 60 / self.raw_data_matrix.shape[0]
+        interval = resolve_cadence(df.index)
+        matrix, dates = make_2d(
+            df, key=use_col, return_day_axis=True, sampling_interval=interval
+        )
+        selection = slice(start_day_ix, end_day_ix)
+        day_index = dates[selection]
+        if day_index.empty:
+            raise ValueError(
+                "No observation days remain after selecting the power column and date range."
+            )
+        self.raw_data_matrix = matrix[:, selection]
+        self.day_index = day_index
+        self.num_days = len(day_index)
+        self.sampling_interval = interval
+        self.data_sampling = interval.value / pd.Timedelta(minutes=1).value
         self.use_column = use_col
-        self.day_index = day_index[start_day_ix:end_day_ix]
-        d1 = self.day_index[0].strftime("%x")
-        d2 = self.day_index[-1].strftime("%x")
-        self.data_frame = self.data_frame[d1:d2]
-        self.start_doy = self.day_index.dayofyear[0]
-        return
-
-    def _check_timezone_misalignment(self):
-        data = self.raw_data_matrix
-        if self.data_frame is not None:
-            # Nearest-neighbor standardization can copy a source row into a
-            # missing slot. Count only matches strictly within half a sample.
-            source_rows = self.data_frame_raw[self.seq_index_key].dropna()
-            source_times = pd.Series(source_rows.index, index=source_rows.to_numpy())
-            measured_at = self.data_frame[self.seq_index_key].map(source_times)
-            half_step = pd.Timedelta(days=1) / (2 * data.shape[0])
-            observed = (abs(measured_at - self.data_frame.index) < half_step).to_numpy()
-            data = np.where(observed.reshape(data.shape, order="F"), data, np.nan)
-        return _check_midnight_production(data)
+        self.data_frame = df.reindex(
+            calendar_grid(day_index[0], day_index[-1], interval)
+        )
+        self.start_doy = day_index.dayofyear[0]
 
     def make_filled_data_matrix(self, zero_night=True, interp_day=True):
         self.filled_data_matrix = np.copy(self.raw_data_matrix)
@@ -1118,15 +1108,16 @@ possible timezone misalignment  {timezone_status}
         return None
 
     def generate_extra_matrix(self, column, new_index=None, key=None):
-        if new_index is None:
-            freq = self.data_sampling * 60
-            end = self.day_index[-1].date() + timedelta(days=1)
-            new_index = pd.date_range(
-                start=self.day_index[0].date(), end=end, freq="{}s".format(freq)
-            )[:-1]
-        num_meas = self.filled_data_matrix.shape[0]
-        new_view = self.data_frame[column].loc[new_index[0] : new_index[-1]]
-        new_view = new_view.values.reshape(num_meas, -1, order="F")
+        grid = self.data_frame.index
+        if new_index is not None and not pd.DatetimeIndex(new_index).astype(
+            "datetime64[ns]"
+        ).equals(grid.astype("datetime64[ns]")):
+            raise ValueError("new_index must match the selected observation grid.")
+        new_view = (
+            self.data_frame[column]
+            .to_numpy()
+            .reshape(self.raw_data_matrix.shape, order="F")
+        )
         if self.time_shifts:
             ts = self.time_shift_analysis
             new_view = ts.apply_corrections(new_view)
@@ -1831,10 +1822,15 @@ possible timezone misalignment  {timezone_status}
         if marker is not None:
             kwargs["marker"] = marker
         if self.day_index is not None:
-            start = self.day_index[start_day]
-            freq = "{}min".format(self.data_sampling)
-            periods = len(plot_data)
-            xs = pd.date_range(start=start, freq=freq, periods=periods)
+            rows = self.raw_data_matrix.shape[0]
+            offsets = pd.to_timedelta(
+                np.arange(rows) * self.sampling_interval.value, unit="ns"
+            )
+            if ravel:
+                xs = self.day_index[slct].repeat(rows) + np.tile(offsets, len(slct))
+            else:
+                day = self.day_index[slct[0] if len(slct) else start_day]
+                xs = day + offsets
         else:
             xs = np.arange(len(plot_data))
         if label is None:

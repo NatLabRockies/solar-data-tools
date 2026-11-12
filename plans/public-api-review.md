@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-11, DH-04 implementation recorded; DH-08 proposal and sequencing added
+- Last revised: 2026-11-12, CI review feedback incorporated
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -38,11 +38,12 @@ For each selected issue or explicitly bounded group:
    authorization.
 
 Section 9 records issue-specific authorizations and completed work. No
-repository-wide execution schedule or release gate has been adopted; DH-08
-records a bounded implementation sequence for pipeline refactoring. P1/P2 labels
-below preserve provisional materiality assessments without establishing an implementation order or
-superseding owner decisions. Design and performance proposals are identified
-separately from demonstrated defects.
+repository-wide execution schedule or release gate has been adopted; DH-08 and
+CI-01 record bounded implementation sequences for pipeline refactoring and the
+first CI work package. P1/P2 labels below preserve provisional materiality
+assessments without establishing an implementation order or superseding owner
+decisions. Design and performance proposals are identified separately from
+demonstrated defects.
 
 ### Decision-pass status and remaining specifications (2026-11-11)
 
@@ -63,7 +64,7 @@ Empirical choices also require validation.
 | Code location / issue | Remaining specification or decision | Public verification path |
 | --- | --- | --- |
 | `data_handler.py`, dilation — DH-02/DH-07 | Keep observed values, daylight bounds, and masks in the same clock frame; define usable-result dependency gates and preserve partial reports. | Nonzero clock correction through PV quantiles/Bundt and mask export; failed optional stages through handler/Dask reports. |
-| Time transformations — DH-04, TIME-01/TIME-02 | Specify the midnight-production warning and snapping ties; propagate exact cadence and implement the agreed NaN padding of partial days with explicit trimming retained. | Fractional-second and partial-day inputs through matrices, extra columns, mask export, and profiler coordinates. |
+| Time transformations — TIME-01/TIME-02 | Settle cadence inference, calendar boundaries, and the public snapping diagnostics contract. | Fractional-second and partial-day inputs through matrices, extra columns, mask export, profiler coordinates, and the midnight advisory. |
 | Native decomposition — SD-01/SD-03/SD-05/SD-06 | Specify result fields, Fourier/penalty details, numerical tolerances, solver-option migration, and recurrence-compatible pooled support. | Pipeline solver pass-through and a recurring shift ending partway through a cycle, including its single fixed-support refit. |
 | Capacity/time-shift selection — CAP-02/SHIFT-01 | Validate bounded endpoint extension, numerical constancy, screening, and the recurrence advisory; remove contradictory correction suppression. | Selection and plots share the verified reference, including zero error; accepted short-lived shifts survive correction application. |
 | Clear-sky classification — CLEAR-01 | Apply the agreed independent-daylight-segment objective through the public wrapper. | `DataHandler.detect_clear_sky` agrees with exhaustive segment-wise path optimization. |
@@ -232,9 +233,8 @@ implementation requests.
 
 #### DH-04 — Replace automatic timezone correction with a midnight-production warning [P2; revised disposition]
 
-- **Status, 2026-11-11:** implementation and verification recorded. Completion
-  requires owner acceptance. See the
-  [decision record](#2026-11-11--dh-04-advisory-contract-approved).
+- **Status, 2026-11-11:** complete. See the
+  [decision and completion record](#2026-11-11--dh-04-advisory-contract-approved).
 - **Locations:** `run_pipeline`, approximately lines 628–651; missing-value mask
   construction near line 435; extra-column processing near lines 659–679;
   `standardize_time_axis` in `time_axis_manipulation.py`, approximately lines
@@ -269,13 +269,15 @@ implementation requests.
   inferred-offset return/report fields in the migration guide. Expose the
   advisory result distinctly from an applied correction; it does not establish
   a particular timezone or offset.
-- **Caller findings, 2026-11-11:** `standardize_time_axis` is a package export
-  and currently returns a `(frame, inferred_offset)` tuple. The handler and
-  profiler scripts pass `correct_tz`; profiler partition inputs expose it as a
-  configuration field. Dask consumes the handler report dictionary. Specify a
-  compatibility policy for those interfaces. Once both corrections are retired,
-  DH-02's observation-clock contract no longer needs its interim timezone
-  exception.
+- **Caller findings, 2026-11-11:** the previous `standardize_time_axis` export
+  returned `(frame, inferred_offset)`, and the handler and profiler scripts
+  passed `correct_tz`. Profiler partition inputs expose the option as a
+  configuration field, and Dask consumes the handler report dictionary. The
+  compatibility transition is recorded below. DH-02's observation-clock
+  contract now applies without its interim timezone exception.
+- **Grid follow-up:** TIME-01 specifies how the advisory will consume the
+  accepted observation mask after one-use snapping is available. The completed
+  DH-04 implementation uses its existing source-distance check until then.
 - **Proposed verification:** shifted production profiles with and without
   meaningful midnight production, low-level noise, isolated anomalies, and
   missing midnight observations. Check warning behavior and unchanged timestamp,
@@ -400,9 +402,9 @@ implementation requests.
 
   | Stage | Responsibility |
   | --- | --- |
-  | Prepare observations | Select the power column, standardize and embed timestamps, apply value bounds, establish the day axis and observation mask, and run DH-04's advisory on observations before filling. Consume the shared grid established by TIME-01/02. |
+  | Prepare observations | Select the power column, standardize and embed timestamps, apply value bounds, establish the day axis and observation mask, compute `capacity_estimate` from observations, and run DH-04's advisory before filling. Consume the shared grid established by TIME-01/02. |
   | Estimate provisional daylight and fill | Estimate daylight from observations, use it for requested nighttime filling, integrate daily energy, and assess whether the filled data are usable. |
-  | Score days and run daily analyses | Preserve quality scoring, flagging, clear-day detection, clipping, dataset summary scoring, and capacity estimation in their established order, with their individual calls and prerequisites visible. |
+  | Score days and run daily analyses | Preserve quality scoring, flagging, clear-day detection, clipping, dataset summary scoring, and capacity-change clustering in their established order, with their individual calls and prerequisites visible. |
   | Apply clock correction and refresh daylight | Keep DH-02's accepted correction and metadata together. Refresh daylight on the resulting clock, preserving the threshold selected by the provisional fit. |
   | Align extra columns | Embed extra columns on the shared grid and apply the accepted clock correction. Keep matrix availability distinct from quality scoring, which requires the final daylight mask. |
 
@@ -415,36 +417,170 @@ implementation requests.
   introducing one catch around all daily analyses. DH-07 owns intentional
   changes to failure propagation, dependency gates, partial results, extra-column
   availability after daylight failure, and reset semantics.
-- **Separate clock-alignment correction:** clipping retains the pre-correction
-  matrix, while orientation fitting can consume its subdaily mask alongside
-  corrected data. Track this correctness change separately from extraction,
-  cross-referencing DH-02 and PROF-03. For the accepted sample permutation
-  $P$, require $M_{\mathrm{clip,corr}} = P M_{\mathrm{clip,obs}}$, preserving the
-  fitted clipping classification and transforming coordinates exactly once.
-  Give that correction a dedicated nonzero-shift regression; mechanical
-  extraction does not resolve or authorize it.
+- **Separate clock-alignment correction:** PROF-03 tracks how the sub-daily
+  clipping mask follows the clock of the data used for orientation. The fit
+  may have used the pre-correction matrix or an already corrected matrix.
+  Preserve the fitted classification and the DH-02 correction during
+  extraction. The coordinate correction requires a separate implementation
+  and nonzero-shift regression.
 - **Explicit implementation sequence:** complete DH-04, then TIME-01/TIME-02,
   then DH-08's mechanical extraction, then DH-07's behavioral changes. This
-  pulls the time-axis work ahead of DH-07 so preparation has a settled grid
-  contract before extraction. Specify DH-07's stage outcomes and reset contract
-  before DH-08, but implement those changes in a separate subsequent diff.
+  gives preparation a settled grid contract before extraction, including the
+  advisory's use of accepted observations. Specify DH-07's stage outcomes and
+  reset contract before DH-08 and implement those changes in a subsequent diff.
   DH-08 need not wait for the native decomposition rewrite; DH-07's integration
   must respect the result contracts owned by SD-01/SD-06. DH-05/DH-06 remain
   independently scheduled. Document placement beside DH-07 reflects code
   location, not implementation order.
 - **Proposed verification:** retain the clock-frame and units regressions and
-  add a small deterministic orchestration check using stage substitutes to
+  DH-04's raw heatmap regression after the wrapped-record daylight exit.
+  Add a small deterministic orchestration check using stage substitutes to
   verify call order, forwarded options, and representative public outputs.
   Cover correction enabled and disabled and preservation of the provisional
-  daylight threshold during refresh. Compare behavior against the accepted
-  post-DH-04/TIME baseline; avoid tests that merely duplicate every private
-  helper. DH-07 owns the changed failure/reset regressions, and the separate
-  clipping correction owns its mask-alignment regression.
+  daylight threshold during refresh. Inject one caught optional-stage failure,
+  such as a clipping failure, and compare the subsequent calls, diagnostics,
+  and available public results with the accepted post-DH-04/TIME baseline.
+  This check preserves the existing exception boundary and continuation path.
+  DH-07 owns tests for intentionally changed failure and reset behavior, and
+  PROF-03 owns the separate clipping-mask alignment regression.
 - **Authorization:** addition of this proposal and sequencing note is a plan
   edit only. Implementation and its verification require issue-specific
   direction under the procedure above.
 
 ### `solardatatools/time_axis_manipulation.py`
+
+#### Shared grid contract for TIME-01 and TIME-02
+
+**Status:** owner approved the cadence, boundary, timezone, and diagnostics
+defaults on 2026-11-11 and authorized implementation, focused tests, and
+independent public-tool review. Implementation and verification are recorded
+below. Completion requires owner acceptance before extracting DH-08's
+preparation stage.
+
+**Cadence and clock**
+
+- Store the nominal cadence $\Delta$ as one exact fixed duration at timestamp
+  precision. Require $\Delta>0$ and $m=24\text{ hours}/\Delta$ to be an
+  integer. Grid row $i$ is at local midnight plus $i\Delta$ for
+  $i=0,\ldots,m-1$. Reject a calendar-dependent or non-tiling interval with an
+  actionable error. Preserve `DataHandler.data_sampling` and the report's
+  `sampling` in minutes, including fractional minutes. Use the exact duration
+  and row count to construct coordinates.
+- **Cadence precedence:** an explicit keyword-only
+  `sampling_interval` in `standardize_time_axis`, `run_pipeline`, and
+  `make_2d`, then fixed frequency metadata, then inference from the available
+  timestamps. Accept fixed duration values such as `"500ms"` and `"90s"`.
+  An explicit cadence sets the requested grid. Rows that cannot be placed on
+  that grid follow the snapping or embedding rules of the entry point.
+- **Inference policy:** use sorted, distinct, valid timestamps to
+  identify a clear one-step spacing, allowing missing scans to produce larger
+  gaps. For jittered records, require one dominant cluster of ordinary gaps
+  and a uniquely supported exact cadence near that cluster. Test alignment to
+  the midnight grid independently of the snapping tolerance. Half-interval
+  snapping alone admits every timestamp on an unbounded grid and supplies no
+  evidence for cadence. The initial inference uses a 2% one-step gap band,
+  at least three gaps in that band and a strict majority of all positive gaps.
+  Jittered candidates must have a median midnight-grid displacement no larger
+  than one quarter of the cadence. Three consecutive nonnominal gaps within
+  a range of 4% of their shortest gap indicate a possible alternate rate. If the evidence is
+  sparse, ambiguous, or supports sustained competing spacings, ask for an
+  explicit interval or for the caller to split the record. Regular omissions
+  can look like a different scan rate, so inference does not recover an
+  unobserved acquisition schedule.
+- **Timezone input policy:** use local standard wall-clock time.
+  Preserve wall-clock labels for naive and fixed-offset inputs. Require
+  callers to resolve a known offset transition before processing an aware
+  index that crosses it. Validate before dropping timezone metadata. Naive
+  timestamps can contain undetectable clock conventions. The DH-04 advisory
+  remains advisory and explicit timezone utilities remain available.
+
+**Snapping and calendar extent**
+
+- Snap each valid source row to its nearest arithmetic grid point once, using
+  a nonnegative physical `snap_tolerance` with default $\Delta/2$. Accept
+  equality at the configured limit. A halfway tie goes to the
+  earlier grid point. For rows competing for one point, retain the closest
+  whole row, using original source order for equal distances, including exact
+  duplicate timestamps. Assign all columns from that row, even when one
+  column is missing. Keep rejected rows available on the source table. Unmatched
+  grid points are missing. Sorting for grid construction preserves the original
+  row identity used for tie-breaking and export.
+- **Extent:** standardize to complete calendar days covering the valid
+  source timestamps and any accepted snapped targets. An accepted snap to
+  midnight just after the final source date extends the grid by one calendar
+  day. A source row gets only its nearest candidate. Absent and padded slots
+  have no source-row assignment. Count missing timestamps among rejected rows.
+  Surface unparseable timestamps or a record with no accepted observations as
+  input errors.
+- `make_2d` embeds already aligned timestamps. For a known cadence it can
+  represent omitted aligned slots as NaN and pad partial calendar days. It
+  rejects off-grid or duplicate rows and directs callers to
+  `standardize_time_axis` for snapping. Retain the existing return forms and
+  explicit `trim_start` and `trim_end` options. For compatibility,
+  preserve the current removal of fully missing leading and trailing days for
+  the selected column, and preserve interior empty days. Apply that day
+  selection once and use its exact grid slice everywhere downstream. If
+  trimming removes all days, return a matrix of shape $(m,0)$ with a matching
+  empty day axis when requested. The pipeline must detect the empty selection
+  before fitting.
+
+**Provenance, consumers, and public compatibility**
+
+- Keep a grid-to-source-row mapping independent of each column's missingness.
+  A row may win a snap while its power value is missing. Compute the power
+  missingness mask from the aligned raw matrix after range filtering. The
+  midnight advisory uses finite values from accepted rows on that same grid,
+  including accepted tolerance boundary snaps. Missing slots, rejected rows,
+  and padding contribute no coverage. The later DH-02 permutation acts on the
+  aligned matrix and its masks, with the observation grid and its source
+  mapping retained.
+- Use the selected grid for the power and extra-column matrices, mask export,
+  sub-daily plot timestamps, daylight masks, solar-noon calculations, and
+  profiler coordinates. Each matrix has exactly $m$ rows and one column per
+  returned date. Sub-daily mask export reverses the applied DH-02 permutation
+  only for corrected-clock masks, then attaches by winning source-row identity.
+  Rows outside the selected range, rejected rows, and losing duplicates remain
+  unlabeled in the source table. They do not receive another row's flag.
+- **Public diagnostics:** preserve the default `(frame, 0)` result
+  of `standardize_time_axis`. An opt-in `return_diagnostics=True` adds a third
+  result with resolved cadence, rejection counts and reasons, and collision
+  records identifying winning and discarded source rows and target timestamps.
+  `DataHandler` retains diagnostics for each preparation attempt, independently
+  of `verbose`. Add `timestamp rejection count` and `timestamp collision count`
+  to the machine-readable report. Rejections count all unassigned input rows,
+  including collision losers. Collisions count grid slots with competing rows.
+  Both are counted before analysis-day selection. A verbose summary can show
+  the counts without dumping all records.
+
+**Verification before DH-08**
+
+- Use a fractional-second case with a partial calendar day, an omitted scan,
+  and a midnight collision. Verify source-row selection, exact matrix positions,
+  shared extra-column alignment, inverse mask export, profiler row coordinates,
+  and advisory coverage. Exercise an exact half-interval tie, a stricter override,
+  and the final-midnight extent choice with explicit expected timestamps.
+  Use deterministic stage substitutes where the check concerns coordinates.
+- Use small separate fixtures for regular 5-second, 15-second, and 90-second
+  data, jitter with missing scans, sustained competing spacings, and unsupported
+  cadence or alignment. Compare direct `make_2d` padding and trimming and
+  preserve ordinary integer-minute behavior. Use these checks and the existing
+  clock-frame and raw heatmap regressions to establish the extraction baseline.
+
+**Implementation and verification**
+
+- Timestamp standardization now retains one winning source row per slot and
+  reports the resolved duration and rejected rows. The handler uses the exact
+  grid for observation and extra matrices, mask export and sub-daily plots.
+  Daylight, solar-noon, and profiler coordinates use the shared row count.
+- Against `2b915ca`, a five-minute omitted scan inherited a neighboring value,
+  five-second standardization raised a zero-interval error, and a 24-hour
+  record beginning at 06:00 returned one matrix column with two date labels.
+- The focused run passed 38 tests in `sdt-dev` (Python 3.13.11,
+  `MPLBACKEND=Agg`), including 13 new grid cases and existing handler,
+  advisory, clock, units, profiler, quantile, and time-shift tests. The
+  fractional-second cases verified source-row alignment using deterministic
+  stage substitutes. The existing profiler fixture emitted a SciPy small-sample
+  warning. Ruff and `git diff --check` passed.
 
 #### TIME-01 — Timestamp snapping fills absent observations [P2]
 
@@ -479,6 +615,14 @@ implementation requests.
   treatment of exact duplicate timestamps. A tolerance override does not relax
   the one-use or collision rules. Document the tolerance and assess
   compatibility with existing irregular-timestamp inputs during implementation.
+- **Midnight advisory integration:** use the shared grid's accepted observation
+  mask and finite values after range filtering, before filling and relative
+  clock correction. An accepted snap counts at its assigned grid timestamp,
+  including a match at the tolerance limit. A caller override changes which
+  snaps are accepted, and the advisory uses that same selection without a
+  second distance check. Exclude unmatched bins, discarded collision rows,
+  and partial-day padding. TIME-02 supplies the exact cadence and within-day
+  coordinates for the existing DH-04 windows and coverage thresholds.
 - **Proposed verification:** an exact grid with one omitted interior sample;
   bounded timestamp jitter; collisions with different distances and tied
   distances; leading/trailing gaps. Cover displacements below, at, and above an
@@ -486,7 +630,10 @@ implementation requests.
   intervals, including sub-minute and nonintegral-minute cadences. Verify
   closest-row selection, collision
   reporting, deterministic ties, and that no source observation fills more than
-  one grid entry. Check unmatched bins and the observation mask, not only shape.
+  one grid entry. Check unmatched bins and the observation mask. Through
+  `run_pipeline`, verify advisory coverage for an accepted exact half-interval
+  tie near midnight and the same source observation rejected under a stricter
+  override. Verify that padding and discarded collisions add no coverage.
 
 #### TIME-02 — Sampling intervals are rounded or truncated inconsistently [P2]
 
@@ -535,7 +682,8 @@ implementation requests.
   values, missingness, time-of-day rows, and returned dates under both default
   padding and explicit trimming. A supported 24-hour record beginning at 06:00
   must span two dated columns, with NaN before its first sample and after its
-  last sample, while retaining every observation in its proper row.
+  last sample, while retaining every observation in its proper row. Verify
+  the midnight advisory's window sizes and coverage on the same exact grid.
 
 ### `solardatatools/matrix_embedding.py`
 
@@ -2969,6 +3117,17 @@ every reconstruction holdout calculation.
   applicable quality checks for each quantity; full-record clear-day selection
   does not make their eligibility identical. Construct per-call masks without
   mutating the handler's flags or leaving a changed shared mask behind.
+- **Separate clipping-mask alignment:** the pipeline normally fits clipping on
+  the pre-correction filled matrix. A lazy fit in `find_clipped_times` or an
+  explicit rerun of `clipping_check` can use the corrected matrix. Associate the
+  fit's mask with the observation grid and sample permutation actually used.
+  For a usable fit on the same grid, let $Q$ map the observation clock to the
+  fit's clock and let $P$ be the current accepted DH-02 permutation. Use
+  $P Q^{-1} M_{\mathrm{clip,fit}}$ for the mask on the current clock, retaining
+  the original fit mask so repeated calls do not compound the transform.
+  A pre-correction fit has $Q=I$. A fit on the current clock has $Q=P$ and
+  requires no remapping. Handle unavailable or stale fits under DH-07. Keep
+  this correction separate from selector retirement and DH-08 extraction.
 - **Proposed verification:** inspect the actual selected dates and final masks
   through both public APIs on multiyear records, including leap dates. Verify
   that eligible clear-day observations throughout the record can enter the fit,
@@ -2979,6 +3138,11 @@ every reconstruction holdout calculation.
   Compare direct orientation estimation with `estimate_all` and repeated calls,
   including a day with some clipped samples. Verify the envelope mask and final
   incidence mask separately, together with preservation of caller-owned flags.
+  For the separate mask correction, use a known nonzero shift and check the
+  exact sample positions after a pre-correction fit and a lazy or rerun fit
+  on the corrected matrix. Repeat mask retrieval to check that the mapping is
+  applied only when needed. Cover replacing the correction on the same grid
+  while retaining a usable fit.
 
 ### `pvsystemprofiler/ground_truth_estimator.py`
 
@@ -3262,8 +3426,149 @@ tests, installations, or experiments.
 - **Proposed correction:** measure the actual packages and detect a no-data
   coverage result. Do not update a published coverage percentage without a
   corresponding measurement.
+  Target `solardatatools`, `pvsystemprofiler`, `anomalydetector`, and `sdt_dask`
+  explicitly. Collect coverage on one designated Python matrix entry and run
+  the same tests without coverage instrumentation on the remaining entries.
+  Retain the coverage report as an artifact. Do not introduce an arbitrary
+  aggregate coverage threshold or imply that collection supplies missing tests.
 - **Proposed verification:** inspect the coverage report's measured files and
-  ensure all intended packages are represented.
+  ensure all intended packages are represented. Confirm that missing collection
+  is detected and that artifact retention works. Implement this correction in
+  the first work package, CI-01.
+
+### `.github/workflows/lint.yml`, `test.yml`, and `test-build.yml`
+
+#### CI-01 — First CI work package: correct coverage, reduce setup overhead, and verify built wheels [design/verification proposal]
+
+- **Evidence:** lint installs the entire SDT dependency tree through `.[dev]`,
+  installs pre-commit again, and creates a temporary branch for the local
+  `no-commit-to-branch` hook. It triggers on both pushes and pull requests,
+  duplicating lint work for ordinary updates to an open same-repository PR.
+  The test job installs uv through an unversioned shell installer without a
+  persistent dependency cache. The three workflows have no explicit concurrency
+  cancellation. `test-build.yml` builds distributions but does not install or
+  exercise them. These are configuration observations; Actions runtimes and
+  repository protection settings were not inspected.
+- **Bounded scope:**
+  - Implement QA-01's actual-package coverage collection on one matrix entry.
+    Preserve the Linux Python 3.10–3.13 test matrix and the existing test suite;
+    reducing supported-version coverage is outside this package.
+  - Make lint install only pre-commit, letting the pinned hooks provide Ruff
+    and other hook dependencies. Cache hook environments with keys that reflect
+    Python and `.pre-commit-config.yaml`. Skip `no-commit-to-branch` in CI and
+    remove the temporary-branch workaround; retain the hook for local use.
+  - Limit lint's push trigger to `main`, retaining PR and manual triggers.
+    Keep tests and build checks active on draft PRs. Add workflow-specific,
+    PR/ref-specific concurrency groups that cancel superseded verification
+    runs without canceling unrelated PRs or workflows. Release jobs are excluded.
+  - Use a versioned `setup-uv` action and explicit uv version with dependency
+    caching in test setup. Key/invalidate caches against the relevant dependency
+    inputs and interpreter/platform. No lockfile or dependency-manager migration
+    is required. Record resolved dependency versions for diagnosis.
+  - Extend the existing build check to build sdist and wheel, run `twine check`,
+    and install the wheel into an isolated environment. From outside the checkout,
+    exercise representative base-install public entry points and packaged
+    resources, verifying import origins. Select a small, concrete set of these
+    smoke checks before writing the workflow. Keep broader numerical validation
+    and known package defects with their existing QA/PKG issues.
+    Use the selected interpreter without `sudo`, and retain the distributions
+    as artifacts. This is the initial
+    installed-wheel check under QA-02, not completion of all its integration work.
+  - Set `MPLBACKEND=Agg` explicitly, add bounded job timeouts, and retain test
+    reports on test failure when available. Record pytest durations and setup
+    timings to inform later optimization. Select timeout values from observed
+    runs with margin rather than truncating legitimate numerical tests.
+- **Explicit sequence:** schedule this as a separate early CI checkpoint,
+  before relying on CI for the broader native-decomposition changes. It does
+  not depend on TIME-01/TIME-02 or DH-08 and does not alter their agreed sequence;
+  do not fold CI edits into an active time-grid or algorithm implementation diff.
+  Within the authorized CI checkpoint: inspect current checks and timings;
+  correct coverage and isolate lint setup; add caching and cancellation; then
+  extend and validate the installed-wheel job. Review the resulting workflows
+  together before treating the package as complete.
+- **Proposed verification:** validate workflow syntax and action configuration;
+  run the existing tests across the retained matrix and the complete configured
+  pre-commit hooks apart from the explicitly skipped local branch restriction.
+  Exercise cold and warm cache paths, report/artifact collection, and an
+  out-of-checkout wheel check. Inspect PR events to confirm lint is not duplicated
+  and a superseded run is canceled without affecting another PR. Verify ordinary
+  PR checks need no MOSEK or AWS credentials. Inspect required-check names before
+  changing triggers; changing branch protection is separately scoped. Attribute
+  any measured savings to setup, lint, coverage, or test execution rather than
+  assuming caching or concurrency makes individual numerical solves faster.
+- **Exclusions:** no numerical-model changes, fixture replacement, test-matrix
+  reduction, cross-platform expansion, optional-extra dependency repair,
+  path-based skipping, licensed-solver infrastructure, publication changes, or
+  live Dask/cloud execution. Distribution failures that expose package defects
+  belong to their owning PKG/QA items; do not conceal them by importing source
+  files from the checkout.
+- **References:** [uv GitHub Actions integration](https://docs.astral.sh/uv/guides/integration/github/)
+  and [GitHub concurrency controls](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
+#### CI-02 — Extend compatibility checks and avoid unnecessary numerical runs [follow-up proposal]
+
+- **Sequence:** follow CI-01's measured baseline. Keep the current Python matrix
+  initially; use timing and compatibility evidence before proposing changes.
+- **Proposed scope:** add a small macOS installed-package check on one supported
+  Python version rather than multiplying the entire OS/Python matrix. Exercise
+  optional extras in separate jobs as PKG-01/PKG-02/OUT-02 resolve their supported
+  dependency contracts. Keep ordinary PR validation independent of licensed
+  solvers; put MOSEK validation in a separate explicitly invoked job with its
+  required installation, license configuration, and QA-04 numerical comparisons.
+  The dormant AWS/license steps in `test.yml` do not establish that coverage.
+- **Conditional execution:** consider skipping numerical jobs for changes
+  limited to the plan or documentation while still running applicable lint and
+  documentation checks. Specify a conservative changed-file rule and preserve
+  an always-completing required check; path-filtering an entire required workflow
+  can leave its check pending. Workflow, dependency, source, test, and fixture
+  changes must trigger their applicable verification. Confirm repository check
+  requirements before adopting this optimization.
+  The final required check must inspect its dependencies' outcomes and fail
+  when an applicable job fails, is canceled, or unexpectedly skips. Only the
+  specified documentation/plan exemption permits numerical jobs to be skipped
+  while the final check succeeds. Check completion alone is insufficient.
+- **Proposed verification:** test code, dependency, workflow, documentation-only,
+  and plan-only change cases; verify intentional skips are reported and required
+  checks complete with the correct outcome. Include a deliberately failing
+  dependency, a canceled applicable job, and an unexpected skip; each must
+  prevent a successful final required check. Verify that the intended
+  documentation/plan exemption permits success when the remaining applicable
+  checks pass. Verify the macOS check imports the installed wheel and the
+  extras jobs exercise their advertised public paths. Do not treat a missing
+  license or an unexecuted compatibility job as a successful test.
+- **References:** [GitHub workflow filtering](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpull_requestpull_request_targetpathspaths-ignore)
+  and [required-check failure and skip behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#handling-skipped-but-required-checks).
+
+### `.github/workflows/build.yml`, `publish-image.yaml`, and `docker/Dockerfile`
+
+#### CI-03 — Bind published distributions and Docker images to the verified release [release-correctness proposal]
+
+- **Finding:** the Docker workflow follows a successful PyPI publication, but
+  the Dockerfile installs unversioned `solar-data-tools[dask]` from PyPI and
+  publishes only `latest`. The image is not explicitly tied to the release that
+  triggered it. The `workflow_run` checkout also defaults to the default branch,
+  so the Docker build definition can differ from the triggering release.
+  The release build also uses `sudo pip` / `sudo python3` and
+  repeats build steps separately from the PR build check.
+- **Proposed correction:** select the triggering release revision explicitly
+  and build the image using either its verified wheel or an exact published
+  version. Check out the Dockerfile and build context at that release revision.
+  When using workflow artifacts, download them from the triggering
+  `github.event.workflow_run.id` and verify their release revision and package
+  version. Publish a versioned image tag alongside `latest`, with the package
+  version recorded and checked. Use the selected Python without `sudo` in the
+  release build. Apply the distribution validation established in CI-01 to the
+  release artifacts and publish those same validated artifacts. Preserve the
+  existing PyPI trusted-publishing mechanism.
+- **Sequence and verification:** address before the next release that uses this
+  publication path, after the CI-01 distribution check is established. Validate
+  checkout revision, artifact run ID, and package-version agreement, including
+  when the default branch has advanced since the release. Validate the Docker
+  build locally or in a nonpublishing job, including its Dask dependency
+  resolution. Coordinate with PKG-01/PKG-02
+  for the Docker/extras pins. Actual PyPI or Docker Hub publication and credential
+  changes require their own authorization; this plan entry does not trigger them.
+- **Reference:** [GitHub `workflow_run` revision and artifact semantics](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run).
 
 ### Distribution validation
 
@@ -3272,6 +3577,10 @@ tests, installations, or experiments.
 - **Evidence gap:** building distributions does not establish that the resulting
   wheel imports and serves public entry points outside the source checkout.
   Missing package assets were not established by this review.
+- **CI integration:** CI-01 supplies the first automated build, metadata, and
+  installed-wheel checks. CI-02 adds compatibility/extras checks as their
+  contracts are resolved. The broader public-flow, asset, license, and native
+  model-artifact verification below remains open until separately completed.
 - **Proposed verification:** when authorized, install the built wheel in an
   isolated environment, run outside the checkout, and exercise representative
   imports, packaged resources, optional extras, and license contents. Coordinate
@@ -4467,6 +4776,11 @@ register.
   observation-grid values and gaps with the default kW display scaling. These
   cases verify diagnostic access and alignment rather than daylight-estimator
   validity on wrapped production profiles.
+- **Completion:** the independent public-tool review inspected the implementation,
+  documentation, and regressions, passed all nine advisory cases, and reported
+  no findings. The owner accepted and committed the implementation on `cleanup`
+  in `4baeb509681a7f8049c77195b836d06e19fbde65`. The separate plan commit
+  `2b915ca53731e6196fdbe89b15ccf6516dba099f` records the decisions and verification.
 
 ### 2026-11-11 — DH-08 proposal and bounded sequencing recorded
 
@@ -4480,3 +4794,41 @@ register.
   for extraction.
 - **Authorization:** edit this plan only. This entry authorizes no source-code
   changes or execution of proposed verification.
+
+### 2026-11-11 — CI improvements and first work package recorded
+
+- **Owner direction:** add the reviewed CI improvements to the working plan,
+  with the first work package clearly scoped and sequenced. Edit the plan only.
+- **First package:** CI-01 coordinates QA-01 coverage repair, lightweight lint
+  setup, caching and superseded-run cancellation, and QA-02's initial isolated
+  wheel check. Retain the existing Python matrix and tests; add headless plotting,
+  bounded runtimes, and diagnostic artifacts. Schedule a separate early CI
+  checkpoint before broader native-decomposition work, without interleaving it
+  with the active time-grid implementation or changing DH-08's dependency order.
+- **Follow-up:** CI-02 owns measured compatibility expansion and conditional
+  execution. CI-03 owns exact-release distribution/image binding before the next
+  release using that path. Broader numerical and installed-package validation
+  remains with QA-02/QA-04 and the relevant implementation issues.
+- **Evidence and authorization:** findings came from workflow, package, Docker,
+  and test-source inspection plus official tooling documentation. No Actions
+  timing study, CI run, branch-protection inspection, or release operation was
+  performed. Recording these packages authorizes no workflow or source changes,
+  environment installation, test execution, or publication.
+
+### 2026-11-12 — CI review clarifications accepted
+
+- **Owner direction:** accept the CI review feedback and update this plan.
+- **CI-01:** select concrete installed-wheel smoke checks before writing the
+  workflow; retain broader numerical validation and package repairs under
+  their existing issues.
+- **CI-02:** require the final check to propagate applicable-job failures,
+  cancellations, and unexpected skips. Verify those outcomes as well as the
+  intended documentation/plan exemption.
+- **CI-03:** bind the Docker build context to the triggering release revision
+  and workflow artifacts to the triggering run ID, with revision/version
+  agreement checked even when the default branch has advanced.
+- **Authorization and verification:** this update changes the plan only.
+  Workflow and source implementation, CI execution, publication, and credential
+  changes require separate authorization. The review used current local
+  sources and official tooling documentation; Actions timings and repository
+  protection settings remain unverified.

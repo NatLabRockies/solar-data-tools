@@ -53,7 +53,19 @@ class TestDataHandler(unittest.TestCase):
         scores_path = filepath / "fixtures" / "scoring" / "density.csv"
         with open(scores_path) as file:
             expected_scores = np.loadtxt(file, delimiter=",")
-        np.testing.assert_allclose(dh.daily_scores.density, expected_scores, atol=1e-3)
+        # The old fixture counted copies at the partial first day's boundary.
+        # Count the actual source observations on that day independently.
+        first_day = dh.day_index[0].date().isoformat()
+        observed = dh.data_frame_raw.loc[first_day, "ac_power_01"]
+        density = np.count_nonzero(observed > 0.02 * dh.capacity_estimate)
+        density /= dh.raw_data_matrix.shape[0]
+        self.assertAlmostEqual(
+            dh.daily_scores.density[0],
+            density / dh.daily_signals.seasonal_density_fit[0],
+        )
+        np.testing.assert_allclose(
+            dh.daily_scores.density[1:], expected_scores[1:], atol=1e-3
+        )
         scores_path = filepath / "fixtures" / "scoring" / "linearity.csv"
         with open(scores_path) as file:
             expected_scores = np.loadtxt(file, delimiter=",")
