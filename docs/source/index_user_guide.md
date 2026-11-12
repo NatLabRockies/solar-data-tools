@@ -102,6 +102,27 @@ for creating a summary table of all data sets.
 dh.report(return_values=True, verbose=False)
 ```
 
+### Power and energy units
+
+`run_pipeline` assumes watts unless you specify `units="kW"`. If your
+input was already in kilowatts and relied on the old magnitude heuristic,
+pass `units="kW"` explicitly. `capacity_estimate` uses the declared input
+unit, and `daily_signals.energy` uses `dh.energy_units`, Wh for W input and
+kWh for kW input. The report's `capacity` field remains in kW, and
+loss-factor report fields labeled `[kWh]` remain in kWh.
+
+`plot_daily_energy()` and the loss-factor waterfall use the stored energy
+unit by default. Pass `units="Wh"` or `units="kWh"` to convert for display.
+Bundt plots display electrical power in kW by default and accept `units="W"`.
+Direct `LossFactorAnalysis` calls assume kWh and accept `energy_units="Wh"`
+for Wh input. Loss attributes use that input unit.
+
+Custom signal labels such as `units="W/m²"` are preserved for analysis and
+plotting. The daily integral carries the signal unit times hours. For custom
+labels the machine-readable electrical `capacity` field is `None`, and loss
+factor analysis requires input declared in W or kW. For clear-sky detection
+with a custom label, call `detect_clear_sky(loss_correction=False)`.
+
 ## Plotting some pipeline results
 
 The DataHandler object has a number of plotting methods that can be used to visualize the results of

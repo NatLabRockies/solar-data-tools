@@ -5,7 +5,7 @@ daily energy production data. Model is of the form
 
 y_t = x_t * d_t * s_t * c_t * w_t, for t in K
 
-where y_t [kWh] is the measured real daily energy on each day, x_t [kWh] is an ideal yearly baseline of performance,
+where y_t is the measured daily energy and x_t is an ideal yearly baseline in the same energy units,
 and d_t, s_t, and w_t are the loss factors for degradation, soiling, capacity changes, and weather respectively. K is
 the set of "known" index values, e.g. the days that we have good energy production values for (not missing or
 corrupted).
@@ -22,11 +22,18 @@ from gfosd import Problem
 import gfosd.components as comp
 from gfosd.components.base_graph_class import GraphComponent
 from tqdm import tqdm
+from solardatatools._units import ENERGY_TO_WH, unit_scale
 
 
 class LossFactorAnalysis:
     def __init__(
-        self, energy_data, capacity_change_labels=None, outage_flags=None, **kwargs
+        self,
+        energy_data,
+        capacity_change_labels=None,
+        outage_flags=None,
+        *,
+        energy_units="kWh",
+        **kwargs,
     ):
         """
         A class for analyzing loss factors, including the degradation rate, of a PV system
@@ -37,8 +44,13 @@ class LossFactorAnalysis:
         :type  capacity_change_labels: 1D array of integer labels, with same length as energy_data
         :param outage_flags: labeling of days with known operational issues, e.g. from DataHandle pipeline
         :type outage_flags: 1D array of integer labels, with same length as energy_data
+        :param energy_units: Units of the daily input, "Wh" or "kWh" (default).
+                             Energy arrays and loss attributes use these units.
         :param kwargs: arguments to be passed to to the make_problem method
         """
+        if energy_units not in ENERGY_TO_WH:
+            raise ValueError("energy_units must be 'Wh' or 'kWh'.")
+        self.energy_units = energy_units
         self.energy_data = energy_data
         if len(self.energy_data) <= 365:
             print(
@@ -236,14 +248,17 @@ class LossFactorAnalysis:
 
     def report(self):
         """
-        Creates a machine-readable dictionary of result from the loss factor analysis
+        Return a machine-readable result with all energy fields in kWh.
         :return: dictionary
         """
         if self.total_energy_loss is not None:
+            scale = unit_scale(self.energy_units, "kWh", ENERGY_TO_WH)
             out = {
                 "degradation rate [%/yr]": self.degradation_rate,
                 "deg rate lower bound [%/yr]": self.degradation_rate_lb,
                 "deg rate upper bound [%/yr]": self.degradation_rate_ub,
+            }
+            energy_losses = {
                 "total energy loss [kWh]": self.total_energy_loss,
                 "degradation energy loss [kWh]": self.degradation_energy_loss,
                 "soiling energy loss [kWh]": self.soiling_energy_loss,
@@ -251,6 +266,12 @@ class LossFactorAnalysis:
                 "weather energy loss [kWh]": self.weather_energy_loss,
                 "system outage loss [kWh]": self.outage_energy_loss,
             }
+            out.update(
+                {
+                    label: value * scale if value is not None else None
+                    for label, value in energy_losses.items()
+                }
+            )
             return out
 
     def plot_pie(self, figsize=None):
@@ -281,52 +302,30 @@ class LossFactorAnalysis:
         plt.title("System loss breakdown")
         return plt.gcf()
 
-    def plot_waterfall(self, plot_capacity_component=True, figsize=(10, 4)):
+    def plot_waterfall(
+        self, plot_capacity_component=True, figsize=(10, 4), *, units=None
+    ):
         """
         Create a waterfall plot of losses
 
+        :param units: Wh or kWh. Defaults to the declared input energy unit.
         :return: matplotlib figure
         """
-        if plot_capacity_component:
-            index = [
-                "baseline",
-                "weather",
-                "outages",
-                "capacity changes",
-                "soiling",
-                "degradation",
-            ]
-            bl = np.sum(self.energy_model[0])
-            data = {
-                "amount": [
-                    bl,
-                    self.weather_energy_loss,
-                    self.outage_energy_loss,
-                    self.capacity_change_loss,
-                    self.soiling_energy_loss,
-                    self.degradation_energy_loss,
-                ]
-            }
-        else:
-            index = [
-                "baseline",
-                "weather",
-                "outages",
-                "soiling",
-                "degradation",
-            ]
-            bl = np.sum(self.energy_model[0])
-            data = {
-                "amount": [
-                    bl,
-                    self.weather_energy_loss,
-                    self.outage_energy_loss,
-                    self.soiling_energy_loss,
-                    self.degradation_energy_loss,
-                ]
-            }
-        fig = waterfall_plot(data, index, figsize=figsize)
-        return fig
+        if units is None:
+            units = self.energy_units
+        scale = unit_scale(self.energy_units, units, ENERGY_TO_WH)
+        amounts = {
+            "baseline": np.sum(self.energy_model[0]),
+            "weather": self.weather_energy_loss,
+            "outages": self.outage_energy_loss,
+            "capacity changes": self.capacity_change_loss,
+            "soiling": self.soiling_energy_loss,
+            "degradation": self.degradation_energy_loss,
+        }
+        if not plot_capacity_component:
+            del amounts["capacity changes"]
+        data = {"amount": [amount * scale for amount in amounts.values()]}
+        return waterfall_plot(data, list(amounts), figsize=figsize, units=units)
 
     def plot_decomposition(self, plot_capacity_component=True, figsize=(16, 8.5)):
         """
@@ -656,7 +655,7 @@ def attribute_losses(energy_model, use_ixs):
     return attributions
 
 
-def waterfall_plot(data, index, figsize=(10, 4)):
+def waterfall_plot(data, index, figsize=(10, 4), *, units="Wh"):
     """
     Create a waterfall plot to visualize the breakdown of energy loss factors.
 
@@ -671,6 +670,7 @@ def waterfall_plot(data, index, figsize=(10, 4)):
     :param figsize: Size of the figure to create, given as (width, height) in inches.
                     Defaults to (10, 4).
     :type figsize: tuple of int, optional
+    :param units: Unit of the supplied amounts. Defaults to Wh.
 
     :return: The figure object containing the waterfall plot.
     :rtype: matplotlib.figure.Figure
@@ -703,7 +703,7 @@ def waterfall_plot(data, index, figsize=(10, 4)):
     )
     my_plot.plot(step.index, step.values, "k")
     my_plot.set_xlabel("Loss Factors")
-    my_plot.set_ylabel("Energy (Wh)")
+    my_plot.set_ylabel(f"Energy ({units})")
 
     # Get the y-axis position for the labels
     y_height = trans.amount.cumsum().shift(1).fillna(0)

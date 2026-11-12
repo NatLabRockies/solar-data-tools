@@ -17,6 +17,7 @@ import matplotlib.cm as cm
 import traceback
 import sys
 from tqdm import tqdm
+from solardatatools._units import ENERGY_TO_WH, POWER_TO_W, unit_scale
 from solardatatools.time_axis_manipulation import (
     make_time_series,
     standardize_time_axis,
@@ -310,7 +311,8 @@ class DataHandler:
         :type extra_cols: str, tuple, or list, optional
         :param daytime_threshold: Threshold for detecting daytime in the data.
         :type daytime_threshold: float, default=0.005
-        :param units: Units of the power data. Can be "W" (watts) or "kW" (kilowatts).
+        :param units: Input signal units. Use "W" (default) or "kW" for
+                      electrical power, or supply a custom signal unit label.
         :type units: str, default="W"
         :param solver: Solver to use for optimization tasks in the pipeline.
         :type solver: str, default="CLARABEL"
@@ -436,8 +438,6 @@ class DataHandler:
             if np.sum(slct) > 0:
                 self.raw_data_matrix[slct] = np.nan
         self.capacity_estimate = np.nanquantile(self.raw_data_matrix, 0.95)
-        if self.capacity_estimate <= 500 and self.power_units == "W":
-            self.power_units = "kW"
         self.boolean_masks.missing_values = np.isnan(self.raw_data_matrix)
         # Run once to get a rough estimate. Update at the end after cleaning
         # is finished
@@ -732,7 +732,7 @@ class DataHandler:
             A dictionary containing the following keys:
 
             - "length": The length of the data set in years.
-            - "capacity": The estimated capacity in kW.
+            - "capacity": The estimated capacity in kW, or None for custom signal units.
             - "sampling": The data sampling rate in minutes.
             - "quality score": The overall data quality score.
             - "clearness score": The clearness score of the data.
@@ -753,14 +753,15 @@ class DataHandler:
             report = my_data_handler.report(verbose=True, return_values=True)
             print(report['capacity'])
         """
+        capacity = self.capacity_estimate
+        capacity_units = self.power_units
+        if capacity_units in POWER_TO_W and capacity is not None:
+            capacity = capacity * unit_scale(capacity_units, "kW", POWER_TO_W)
+            capacity_units = "kW"
         try:
             report = {
                 "length": self.num_days / 365,
-                "capacity": (
-                    self.capacity_estimate
-                    if self.power_units == "kW"
-                    else self.capacity_estimate / 1000
-                ),
+                "capacity": capacity if capacity_units == "kW" else None,
                 "sampling": self.data_sampling,
                 "quality score": self.data_quality_score,
                 "clearness score": self.data_clearness_score,
@@ -786,19 +787,7 @@ class DataHandler:
                     )
                 else:
                     l1 = "Length:                {} days\n".format(self.num_days)
-                if self.power_units == "W":
-                    l1_a = "Capacity estimate:     {:.2f} kW\n".format(
-                        self.capacity_estimate / 1000
-                    )
-                elif self.power_units == "kW":
-                    l1_a = "Capacity estimate:     {:.2f} kW\n".format(
-                        self.capacity_estimate
-                    )
-                else:
-                    l1_a = "Capacity estimate:     {:.2f} ".format(
-                        self.capacity_estimate
-                    )
-                    l1_a += self.power_units + "\n"
+                l1_a = f"Capacity estimate:     {capacity:.2f} {capacity_units}\n"
                 if self.raw_data_matrix.shape[0] <= 1440:
                     l2 = "Data sampling:         {} minute\n".format(self.data_sampling)
                 else:
@@ -818,7 +807,7 @@ class DataHandler:
 DATA SET REPORT
 -----------------
 length               {report["length"]:.2f} years
-capacity estimate    {report["capacity"]:.2f} kW
+capacity estimate    {capacity:.2f} {capacity_units}
 data sampling        {report["sampling"]} minutes
 quality score        {report["quality score"]:.2f}
 clearness score      {report["clearness score"]:.2f}
@@ -897,13 +886,18 @@ time zone errors     {report["time zone correction"] != 0}
 
         :return: None
             Prints the results of the loss factor analysis if `verbose` is `True`.
-        :raises: RuntimeError if the pipeline has not been run before calling this method.
+        :raises ValueError: If the input signal is declared in units other than W or kW.
         """
         if self._ran_pipeline:
+            if self.power_units not in POWER_TO_W:
+                raise ValueError(
+                    "Loss factor analysis requires power units 'W' or 'kW'."
+                )
             self.loss_analysis = LossFactorAnalysis(
                 self.daily_signals.energy,
                 capacity_change_labels=self.capacity_analysis.labels,
                 outage_flags=~self.daily_flags.no_errors,
+                energy_units=self.energy_units,
                 tau=tau,
                 num_harmonics=num_harmonics,
                 deg_type=deg_type,
@@ -925,39 +919,25 @@ time zone errors     {report["time zone correction"] != 0}
             if verbose:
                 lb = self.loss_analysis.degradation_rate_lb
                 ub = self.loss_analysis.degradation_rate_ub
+                confidence_line = ""
                 if lb is not None and ub is not None:
-                    print(
-                        f"""
+                    confidence_line = f"\n                    deg. rate 95% confidence:          [{lb:>6.3f}, {ub:>6.3f}]"
+                losses = self.loss_analysis.report()
+                print(
+                    f"""
                     ***************************************
                     * Solar Data Tools Loss Factor Report *
                     ***************************************
 
-                    degradation rate [%/yr]:                    {self.loss_analysis.degradation_rate:>6.3f}
-                    deg. rate 95% confidence:          [{lb:>6.3f}, {ub:>6.3f}]
-                    total energy loss [kWh]:             {self.loss_analysis.total_energy_loss:>13.1f}
-                    bulk deg. energy loss (gain) [kWh]:  {self.loss_analysis.degradation_energy_loss:>13.1f}
-                    soiling energy loss [kWh]:           {self.loss_analysis.soiling_energy_loss:>13.1f}
-                    capacity change energy loss [kWh]:   {self.loss_analysis.capacity_change_loss:>13.1f}
-                    weather energy loss [kWh]:           {self.loss_analysis.weather_energy_loss:>13.1f}
-                    system outage loss [kWh]:            {self.loss_analysis.outage_energy_loss:>13.1f}
+                    degradation rate [%/yr]:                    {self.loss_analysis.degradation_rate:.3f}{confidence_line}
+                    total energy loss [kWh]:             {losses["total energy loss [kWh]"]:>13.1f}
+                    bulk deg. energy loss (gain) [kWh]:  {losses["degradation energy loss [kWh]"]:>13.1f}
+                    soiling energy loss [kWh]:           {losses["soiling energy loss [kWh]"]:>13.1f}
+                    capacity change energy loss [kWh]:   {losses["capacity change energy loss [kWh]"]:>13.1f}
+                    weather energy loss [kWh]:           {losses["weather energy loss [kWh]"]:>13.1f}
+                    system outage loss [kWh]:            {losses["system outage loss [kWh]"]:>13.1f}
                     """
-                    )
-                else:
-                    print(
-                        f"""
-                    ***************************************
-                    * Solar Data Tools Loss Factor Report *
-                    ***************************************
-
-                    degradation rate [%/yr]:                    {self.loss_analysis.degradation_rate:.3f}
-                    total energy loss [kWh]:             {self.loss_analysis.total_energy_loss:>13.1f}
-                    bulk deg. energy loss (gain) [kWh]:  {self.loss_analysis.degradation_energy_loss:>13.1f}
-                    soiling energy loss [kWh]:           {self.loss_analysis.soiling_energy_loss:>13.1f}
-                    capacity change energy loss [kWh]:   {self.loss_analysis.capacity_change_loss:>13.1f}
-                    weather energy loss [kWh]:           {self.loss_analysis.weather_energy_loss:>13.1f}
-                    system outage loss [kWh]:            {self.loss_analysis.outage_energy_loss:>13.1f}
-                    """
-                    )
+                )
         else:
             print("Please run pipeline first.")
 
@@ -1130,6 +1110,15 @@ time zone errors     {report["time zone correction"] != 0}
             / self.filled_data_matrix.shape[0]
         )
         return
+
+    @property
+    def energy_units(self):
+        """Units of the daily integral on the input scale."""
+        if self.power_units in POWER_TO_W:
+            return f"{self.power_units}h"
+        if self.power_units is not None:
+            return f"({self.power_units}) h"
+        return None
 
     def generate_extra_matrix(self, column, new_index=None, key=None):
         if new_index is None:
@@ -2035,7 +2024,7 @@ time zone errors     {report["time zone correction"] != 0}
         plt.legend()
         return fig
 
-    def plot_daily_energy(self, flag=None, figsize=(8, 6), units="Wh"):
+    def plot_daily_energy(self, flag=None, figsize=(8, 6), units=None):
         """
         Plot the daily energy production.
 
@@ -2048,7 +2037,8 @@ time zone errors     {report["time zone correction"] != 0}
         :param figsize: The size of the figure to create. Default is (8, 6).
         :type figsize: tuple, optional
 
-        :param units: The units to use for the energy data. Default is "Wh".
+        :param units: Display units. Defaults to the stored integral units.
+                      Electrical energy can be displayed in Wh or kWh.
         :type units: str, optional
 
         :return: The figure showing the daily energy analysis.
@@ -2056,17 +2046,20 @@ time zone errors     {report["time zone correction"] != 0}
         """
         if self.filled_data_matrix is None:
             return
+        source_units = self.energy_units
+        if units is None:
+            units = source_units
+        energy = self.daily_signals.energy * unit_scale(
+            source_units, units, ENERGY_TO_WH
+        )
         fig = plt.figure(figsize=figsize)
-        energy = np.copy(self.daily_signals.energy)
-        if np.max(energy) > 1000:
-            energy /= 1000
-            units = "kWh"
         try:
             xs = self.day_index.to_pydatetime()
         except AttributeError:
             xs = np.arange(len(self.daily_signals.density))
         plt.plot(xs, energy, linewidth=1)
-        title = "Daily energy production"
+        electrical = source_units in ENERGY_TO_WH
+        title = "Daily energy production" if electrical else "Daily signal integral"
         if flag == "good":
             plt.plot(
                 xs[self.daily_flags.no_errors],
@@ -2106,7 +2099,8 @@ time zone errors     {report["time zone correction"] != 0}
         plt.title(title)
         plt.gcf().autofmt_xdate()
         plt.xlabel("Date")
-        plt.ylabel("Energy ({})".format(units))
+        label = "Energy" if electrical else "Integral"
+        plt.ylabel(f"{label} ({units})" if units is not None else label)
         return fig
 
     def plot_clipping(self, figsize=(10, 8)):
@@ -2477,7 +2471,7 @@ time zone errors     {report["time zone correction"] != 0}
     def plot_bundt(
         self,
         figsize=(12, 8),
-        units="kW",
+        units=None,
         inner_radius=1.0,
         slice_thickness=100,
         elev=45,
@@ -2488,6 +2482,15 @@ time zone errors     {report["time zone correction"] != 0}
         aggregate=True,
         skip=0,
     ):
+        """Plot daily power on the dilated grid.
+
+        Display electrical power in kW by default, or request W or kW with
+        ``units``. Custom input labels are displayed on their original scale.
+        """
+        if units is None:
+            units = "kW" if self.power_units in POWER_TO_W else self.power_units
+        scale = unit_scale(self.power_units, units, POWER_TO_W)
+
         # Ensure sunrise/sunset analysis has been run
         if (
             not hasattr(self, "daytime_analysis")
@@ -2537,7 +2540,7 @@ time zone errors     {report["time zone correction"] != 0}
             data_for_bundt = data.T  # shape: (365, 101)
 
         fig = plot_bundt_cake(
-            data_for_bundt,
+            data_for_bundt * scale,
             figsize=figsize,
             units=units,
             inner_radius=inner_radius,

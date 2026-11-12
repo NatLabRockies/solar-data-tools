@@ -109,7 +109,7 @@ def test_pipeline_keeps_clock_frames_aligned(monkeypatch, periodic_detector):
     monkeypatch.setattr(
         "solardatatools.data_handler.plot_bundt_cake", lambda data, **kwargs: data
     )
-    bundt_data = dh.plot_bundt(aggregate=False)
+    bundt_data = dh.plot_bundt(aggregate=False, units="W")
     np.testing.assert_array_equal(
         bundt_data[:num_days], dh.sig_dilated[1:].reshape(num_days, 101)
     )

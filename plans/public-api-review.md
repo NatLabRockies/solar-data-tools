@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-11, DH-01 completed and DH-02 implementation recorded
+- Last revised: 2026-11-11, DH-02 completed and DH-03 implementation recorded
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -143,9 +143,8 @@ implementation requests.
 
 #### DH-02 — Automatic time-shift retry mixes correction state from different runs [P1]
 
-- **Status, 2026-11-11:** implementation and verification are recorded below.
-  Completion requires owner acceptance. See the
-  [decision record](#2026-11-11--dh-02-clock-frame-contract-approved).
+- **Status, 2026-11-11:** complete. See the
+  [decision and completion record](#2026-11-11--dh-02-clock-frame-contract-approved).
 - **Location:** `run_pipeline`, approximately lines 603–617;
   `auto_fix_time_shifts`, approximately lines 1413–1415. Related:
   `algorithms/time_shifts.py`, `apply_corrections` and `invert_corrections`.
@@ -192,6 +191,9 @@ implementation requests.
 
 #### DH-03 — Unit handling overrides explicit input and labels energy by magnitude [P2]
 
+- **Status, 2026-11-11:** implementation and verification recorded. Completion
+  requires owner acceptance. See the
+  [decision record](#2026-11-11--dh-03-units-contract-approved).
 - **Location:** `run_pipeline`, lines 432–434; `make_filled_data_matrix`, lines
   1127–1130; `plot_daily_energy`, approximately line 2057;
   `run_loss_factor_analysis` and `algorithms/loss_factor_analysis.py` reports.
@@ -214,6 +216,13 @@ implementation requests.
   conversion. Preserve stored scientific arrays when converting for display,
   and document the changed behavior for callers that relied on implicit
   relabeling.
+- **Caller findings, 2026-11-11:** Dask collects the handler's `capacity`
+  field, documented in kW, and merges LFA report fields keyed by `[kWh]`.
+  Preserve or explicitly migrate these machine-readable fields. `plot_bundt`
+  defaults to a kW label on the supplied power values, while LFA's waterfall
+  uses a fixed Wh label. `plot_heatmap` has a separate, established explicit
+  label override from DH-01. Coordinate report conversion with LFA-05, which
+  owns removal of the unit-dependent near-zero fit cutoff.
 - **Proposed verification:** supply the same physical signal in W and kW,
   including a small system, and compare capacity, energy, plots, and loss reports
   after conversion to common units. Cover omitted units using the W default,
@@ -4286,3 +4295,41 @@ register.
 - **Verification scope:** the clock-frame regressions inject the shift and
   selected fits to verify coordinate transformations. The existing time-shift
   and quantile/dilation fixtures exercise the numerical estimators.
+- **Completion:** the independent public-tool review inspected all six files
+  and reported no findings. All three new regressions passed independently,
+  and `git diff --check` passed. The owner accepted and committed the work on
+  `cleanup` in `73dd2cf82e82f9278464e5912503bec520905b47`.
+
+### 2026-11-11 — DH-03 units contract approved
+
+- **Owner disposition:** retain `run_pipeline(units="W")` and honor the
+  declared units without magnitude-based inference. Store capacity in the
+  input unit. Integration over hours maps W to Wh and kW to kWh.
+- **Reports:** keep the handler's `capacity` field in kW and the LFA
+  `[kWh]` report fields in kWh, including when consumed by Dask. Convert
+  explicitly at reporting boundaries. Direct `LossFactorAnalysis` accepts
+  `energy_units="Wh"` and defaults to `"kWh"`. Its energy arrays and loss
+  attributes use the declared input unit.
+- **Plots:** default daily energy and the LFA waterfall to their stored
+  energy units and convert for an explicit Wh or kWh request. For electrical
+  power, Bundt plots default to kW and convert values to the requested W or
+  kW. Preserve the heatmap's explicit label override from DH-01.
+- **Custom labels:** retain other declared labels for signal analysis and
+  plotting. Report the daily integral in the input unit multiplied by hours.
+  For these labels the machine-readable electrical capacity is unavailable,
+  and LFA requires declared electrical units.
+- **Authorized scope:** implement the approved unit handling, add focused
+  regressions, and obtain independent public-tool review. LFA-05 owns the
+  near-zero fit cutoff. W/kW comparisons for DH-03 use energies admitted in
+  both units to isolate conversion and reporting.
+- **Changes made:** removed capacity- and energy-magnitude inference. Propagate
+  the declared energy unit into LFA, convert stable report fields at output,
+  and scale daily-energy, waterfall, and Bundt display values out of place.
+  The user guide documents the explicit kW migration and custom-label behavior.
+- **Verification:** the two W/kW pipeline regressions reproduced the capacity
+  relabeling and daily-plot conversion defects against `73dd2cf`. The focused
+  run passed all twelve tests across units, clock frames, DataHandler,
+  quantile/dilation, and Bundt plotting in `sdt-dev` (Python 3.13.11,
+  `MPLBACKEND=Agg`). Ruff checks and `git diff --check` passed. The unit tests
+  inject loss results to verify conversion and reporting independently of the
+  LFA numerical estimator.
