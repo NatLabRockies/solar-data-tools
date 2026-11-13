@@ -411,10 +411,9 @@ implementation requests.
 
 #### DH-08 — Extract explicit pipeline stages while preserving established behavior [design proposal]
 
-- **Status, 2026-11-12:** next implementation item in the pipeline sequence.
-  The accepted DH-04 and TIME-01/TIME-02 changes establish the baseline.
-  The owner approved DH-07's outcome and reset contract and authorized the
-  behavior-preserving extraction, focused tests, and public-tool review.
+- **Status, 2026-11-12:** complete. The owner accepted and committed the
+  independently reviewed extraction in `42dbfc020e65a3d3664dc6f927c81849b1d43724`.
+  DH-09 is next in the pipeline sequence.
 - **Locations:** `DataHandler.run_pipeline`, beginning at line 221 on
   `c4ce08e`, and its preparation, filling, scoring, clock-correction, and
   extra-column helpers in `data_handler.py`.
@@ -476,9 +475,9 @@ implementation requests.
 
 #### DH-09 — Extract plotting support while retaining the public handler methods [design proposal]
 
-- **Status and sequence, 2026-11-12:** owner accepted a separate plotting
-  extraction after DH-08. Schedule it as its own checkpoint before DH-07;
-  reporting extraction belongs with DH-07. This entry authorizes planning only.
+- **Status and sequence, 2026-11-12:** active. The owner directed continuation
+  with the modified sequence after committing DH-08. DH-09 is its own
+  checkpoint before DH-07, which includes reporting extraction.
 - **Locations:** `DataHandler.plot_*` in `solardatatools/data_handler.py`,
   `solardatatools/plotting.py`, and a private plotting module if needed to keep
   handler-specific support separate from the existing public plotting API.
@@ -502,6 +501,10 @@ implementation requests.
   planned Bundt calendar and prerequisite corrections, and PROF-03 owns clipping
   mask alignment. Do not fold those behavioral changes into this extraction.
   Moving the small score/flag/signal/mask container classes is outside this item.
+- **Owner-approved display correction, 2026-11-12:** the seasonal density
+  plot uses the thresholds recorded by quality flagging. If those thresholds
+  are unset, it uses the existing 0.6 and 1.05 defaults. This changes the
+  displayed bands for custom thresholds and preserves fitting and classification.
 - **Proposed verification:** exercise public handler methods and the extracted
   rendering functions with representative prepared inputs under `Agg`. Cover
   raw, filled, and extra-matrix heatmaps, daily energy and its units, an
@@ -510,8 +513,8 @@ implementation requests.
   forwarding, and unchanged source arrays. Retain existing clock, unit, and
   raw-heatmap-after-early-exit regressions. Use semantic plot assertions and
   focused headless rendering checks without requiring pixel-identical output.
-- **Authorization:** this is a plan-only addition. Source/test implementation
-  and execution of the proposed verification require issue-specific direction.
+- **Authorization:** continue with the behavior-preserving plotting extraction
+  and its focused verification. The approved sequence places DH-07 afterward.
 
 ### `solardatatools/time_axis_manipulation.py`
 
@@ -5003,3 +5006,27 @@ register.
   DH-07 follows with its behavioral and reporting changes. This does not reopen
   or expand the reviewed DH-08 implementation, authorize source/test changes,
   or authorize execution of the proposed checks.
+
+### 2026-11-12 — DH-08 completed and DH-09 opened
+
+- **Completion:** the owner accepted and committed DH-08 on `cleanup` in
+  `42dbfc020e65a3d3664dc6f927c81849b1d43724`. The independent public-tool
+  review reported no findings, passed 14 targeted tests, and matched the
+  expanded stage bodies to the baseline pipeline. The focused builder run
+  passed 37 tests, including both orchestration cases.
+- **Next:** continue with DH-09's plotting extraction as a separate checkpoint.
+  DH-07 follows with the approved behavioral changes and reporting extraction.
+- **DH-09 implementation checkpoint:** shared rendering and Bundt plot data
+  preparation live in private functions in `plotting.py`. The capacity-change,
+  time-shift, and clipping diagnostics live with their algorithms. The two
+  time-shift views share rendering while retaining their axes and styles.
+  `data_handler.py` dropped from 2,754 to 2,447 lines and retains the public
+  plotting methods, prerequisites, and input selection.
+- **DH-09 verification:** 53 focused tests passed under `Agg`, including 15
+  plotting cases. All 14 behavior-preserving plotting cases also passed with
+  the pre-extraction handler and time-shift algorithm. The custom-threshold
+  density case exercises the approved display correction. The
+  earlier consolidated checkpoint matched plotted data and labels for 14
+  additional baseline configurations and retained all 15 public plotting
+  signatures. Ruff and `git diff --check` passed. Joblib reported a local
+  physical-core detection warning and used the logical-core count.

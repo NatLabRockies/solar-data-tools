@@ -197,6 +197,39 @@ class ClippingDetection:
         self.point_masses = point_masses
         self.point_mass_locations = point_mass_values
 
+    @staticmethod
+    def _plot_scores(
+        xs, clip_stat_1, clip_stat_2, clipped_days, inverter_clipping, figsize
+    ):
+        """Render clipping scores and flags from the caller’s result snapshot."""
+        fig, ax = plt.subplots(nrows=2, figsize=figsize, sharex=True)
+        ax[0].plot(xs, clip_stat_1)
+        ax[1].plot(xs, clip_stat_2)
+        if inverter_clipping:
+            ax[0].plot(
+                xs[clipped_days],
+                clip_stat_1[clipped_days],
+                ls="none",
+                marker=".",
+                color="red",
+                label="days with inverter clipping",
+            )
+            ax[1].plot(
+                xs[clipped_days],
+                clip_stat_2[clipped_days],
+                ls="none",
+                marker=".",
+                color="red",
+            )
+            ax[0].legend()
+        ax[0].set_title("Clipping Score 1: ratio of daily max to overal max")
+        ax[1].set_title(
+            "Clipping Score 2: fraction of daily energy generated at daily max power"
+        )
+        ax[1].set_xlabel("Date")
+        plt.gcf().autofmt_xdate()
+        return fig
+
     def plot_cdf(self, figsize=(8, 6)):
         x_rs = self.cdf_x
         y_rs = self.cdf_y

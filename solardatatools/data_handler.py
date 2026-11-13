@@ -11,8 +11,6 @@ import numpy as np
 import pandas as pd
 import cvxpy as cvx
 from sklearn.cluster import DBSCAN
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import traceback
 import sys
 import warnings
@@ -37,7 +35,8 @@ from solardatatools.data_quality import (
 )
 from solardatatools.data_filling import zero_nighttime, interp_missing
 from solardatatools.clear_day_detection import ClearDayDetection
-from solardatatools.plotting import plot_2d, plot_bundt_cake
+from solardatatools import plotting as _plots
+from solardatatools.plotting import plot_bundt_cake
 from solardatatools.daytime import _check_midnight_production
 from solardatatools.polar_transform import PolarTransform
 from solardatatools.algorithms import (
@@ -53,6 +52,18 @@ from solardatatools.algorithms import (
 from pandas.plotting import register_matplotlib_converters
 
 register_matplotlib_converters()
+
+
+def _select_daily_plot_flag(daily_flags, flag):
+    if flag == "good":
+        return daily_flags.no_errors, ", good days flagged"
+    if flag == "bad":
+        return ~daily_flags.no_errors, ", bad days flagged"
+    if flag in ["clear", "sunny"]:
+        return daily_flags.clear, ", clear days flagged"
+    if flag == "cloudy":
+        return daily_flags.cloudy, ", cloudy days flagged"
+    return None, ""
 
 
 class DataHandler:
@@ -1346,54 +1357,16 @@ possible timezone misalignment  {timezone_status}
         else:
             self.capacity_changes = False
         if plot:
-            metric = np.exp(self.capacity_analysis.metric)
-            s1 = np.exp(self.capacity_analysis.s1)
-            s2 = np.exp(self.capacity_analysis.s2)
-            s3 = np.exp(self.capacity_analysis.s3)
-            labels = self.capacity_analysis.labels
             try:
                 xs = self.day_index.to_pydatetime()
             except AttributeError:
                 xs = np.arange(self.num_days)
-            if show_clusters:
-                fig, ax = plt.subplots(
-                    nrows=2,
-                    figsize=figsize,
-                    sharex=True,
-                    gridspec_kw={"height_ratios": [4, 1]},
-                )
-                ax[0].plot(
-                    xs[self.daily_flags.no_errors],
-                    metric[self.daily_flags.no_errors],
-                    alpha=0.3,
-                    label="measured signal",
-                    marker=".",
-                    ls="none",
-                    color="gray",
-                )
-                ax[0].plot(xs, s1, label="capacity change detector")
-                ax[0].plot(xs, s1 * s2 * s3, label="signal model")
-                ax[0].legend()
-                ax[0].set_title("Detection of system capacity changes")
-                ax[1].set_xlabel("date")
-                ax[0].set_ylabel("daily max power")
-                ax[1].plot(xs, labels, ls="none", marker=".")
-                ax[1].set_ylabel("Capacity clusters")
-            else:
-                fig, ax = plt.subplots(nrows=1, figsize=figsize)
-                ax.plot(xs, s1, label="capacity change detector")
-                ax.plot(xs, s1 * s2 * s3, label="signal model")
-                ax.plot(
-                    xs[self.daily_flags.no_errors],
-                    metric[self.daily_flags.no_errors],
-                    alpha=0.3,
-                    label="measured signal",
-                )
-                ax.legend()
-                ax.set_title("Detection of system capacity changes")
-                ax.set_ylabel("daily maximum power")
-                ax.set_xlabel("date")
-            return fig
+            return self.capacity_analysis._plot_detection(
+                xs,
+                no_errors=self.daily_flags.no_errors,
+                figsize=figsize,
+                show_clusters=show_clusters,
+            )
 
     def auto_fix_time_shifts(
         self,
@@ -1748,72 +1721,25 @@ possible timezone misalignment  {timezone_status}
             else:
                 units = self.power_units
         if flag is None:
-            return plot_2d(
-                mat,
-                figsize=figsize,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
+            flagged_days, title = None, None
         elif flag == "good":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.no_errors,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, good days flagged")
-            return fig
+            flagged_days, title = self.daily_flags.no_errors, "good days flagged"
         elif flag == "bad":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=~self.daily_flags.no_errors,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, bad days flagged")
-            return fig
+            flagged_days, title = ~self.daily_flags.no_errors, "bad days flagged"
         elif flag in ["clear", "sunny"]:
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.clear,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, clear days flagged")
-            return fig
+            flagged_days, title = self.daily_flags.clear, "clear days flagged"
         elif flag == "cloudy":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.cloudy,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, cloudy days flagged")
-            return fig
+            flagged_days, title = self.daily_flags.cloudy, "cloudy days flagged"
         elif flag == "clipping":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.inverter_clipped,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, days with inverter clipping flagged")
-            return fig
+            flagged_days = self.daily_flags.inverter_clipped
+            title = "days with inverter clipping flagged"
         else:
             print("Unknown daily flag. Please use one of the following:")
             print("good, bad, sunny, cloudy, clipping")
             return
+        return _plots._plot_flagged_heatmap(
+            mat, flagged_days, title, self.day_index, units, year_lines, figsize
+        )
 
     def plot_daily_signals(
         self,
@@ -1898,14 +1824,6 @@ possible timezone misalignment  {timezone_status}
             plot_data = self.raw_data_matrix[:, slct]
         if ravel:
             plot_data = plot_data.ravel(order="F")
-        fig = plt.figure(figsize=figsize)
-        kwargs = {}
-        if color is not None:
-            kwargs["color"] = color
-        if alpha is not None:
-            kwargs["alpha"] = alpha
-        if marker is not None:
-            kwargs["marker"] = marker
         if self.day_index is not None:
             rows = self.raw_data_matrix.shape[0]
             offsets = pd.to_timedelta(
@@ -1918,12 +1836,7 @@ possible timezone misalignment  {timezone_status}
                 xs = day + offsets
         else:
             xs = np.arange(len(plot_data))
-        if label is None:
-            label = "measured power"
-        plt.plot(xs, plot_data, linewidth=1, **kwargs, label=label)
         if boolean_mask is not None:
-            if mask_label is None:
-                mask_label = "boolean mask"
             m, n = self.raw_data_matrix.shape
             index_shape = boolean_mask.shape
             cond1 = index_shape == (m, n)
@@ -1933,23 +1846,25 @@ possible timezone misalignment  {timezone_status}
             elif cond2:
                 temp_bool = np.tile(boolean_mask, (m, 1))
                 plot_flags = temp_bool[:, slct].ravel(order="F")
-            plt.plot(
-                xs[plot_flags],
-                plot_data[plot_flags],
-                ls="none",
-                marker=".",
-                color="red",
-                label=mask_label,
-            )
+        else:
+            plot_flags = None
+        plot_model = None
         if show_clear_model and self.scsf is not None:
             plot_model = self.scsf.reshape(self.raw_data_matrix.shape, order="F")
             plot_model = plot_model[:, slct].ravel(order="F")
-            plt.plot(
-                xs, plot_model, color="orange", linewidth=1, label="clear sky model"
-            )
-        if show_legend:
-            plt.legend()
-        return fig
+        return _plots._plot_daily_signals(
+            xs,
+            plot_data,
+            flags=plot_flags,
+            model=plot_model,
+            figsize=figsize,
+            color=color,
+            alpha=alpha,
+            label=label,
+            mask_label=mask_label,
+            show_legend=show_legend,
+            marker=marker,
+        )
 
     def plot_density_signal(self, flag=None, show_fit=False, figsize=(8, 6)):
         """
@@ -1979,91 +1894,37 @@ possible timezone misalignment  {timezone_status}
         """
         if self.daily_signals.density is None:
             return
-        fig = plt.figure(figsize=figsize)
         try:
             xs = self.day_index.to_pydatetime()
         except AttributeError:
             xs = np.arange(len(self.daily_signals.density))
-        plt.plot(xs, self.daily_signals.density, linewidth=1)
-        title = "Daily signal density"
+        flagged, suffix = flag, ", days flagged"
         if isinstance(flag, str):
             if flag == "density":
-                plt.plot(
-                    xs[~self.daily_flags.density],
-                    self.daily_signals.density[~self.daily_flags.density],
-                    ls="none",
-                    marker=".",
-                    color="red",
+                flagged, suffix = (
+                    ~self.daily_flags.density,
+                    ", density outlier days flagged",
                 )
-                title += ", density outlier days flagged"
-            if flag == "good":
-                plt.plot(
-                    xs[self.daily_flags.no_errors],
-                    self.daily_signals.density[self.daily_flags.no_errors],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", good days flagged"
-            elif flag == "bad":
-                plt.plot(
-                    xs[~self.daily_flags.no_errors],
-                    self.daily_signals.density[~self.daily_flags.no_errors],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", bad days flagged"
-            elif flag in ["clear", "sunny"]:
-                plt.plot(
-                    xs[self.daily_flags.clear],
-                    self.daily_signals.density[self.daily_flags.clear],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", clear days flagged"
-            elif flag == "cloudy":
-                plt.plot(
-                    xs[self.daily_flags.cloudy],
-                    self.daily_signals.density[self.daily_flags.cloudy],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", cloudy days flagged"
-        else:
-            plt.plot(
-                xs[flag],
-                self.daily_signals.density[flag],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", days flagged"
-        if np.logical_and(
-            show_fit, self.daily_signals.seasonal_density_fit is not None
-        ):
-            plt.plot(xs, self.daily_signals.seasonal_density_fit, color="orange")
-            plt.plot(
-                xs,
-                0.6 * self.daily_signals.seasonal_density_fit,
-                color="green",
-                linewidth=1,
-                ls="--",
-            )
-            plt.plot(
-                xs,
-                1.05 * self.daily_signals.seasonal_density_fit,
-                color="green",
-                linewidth=1,
-                ls="--",
-            )
-        plt.title(title)
-        plt.gcf().autofmt_xdate()
-        plt.ylabel("Fraction non-zero values")
-        plt.xlabel("Date")
-        return fig
+            else:
+                flagged, suffix = _select_daily_plot_flag(self.daily_flags, flag)
+        return _plots._plot_density_signal(
+            xs,
+            self.daily_signals.density,
+            flagged=flagged,
+            suffix=suffix,
+            seasonal_fit=self.daily_signals.seasonal_density_fit if show_fit else None,
+            lower_threshold=(
+                0.6
+                if self.__density_lower_threshold is None
+                else self.__density_lower_threshold
+            ),
+            upper_threshold=(
+                1.05
+                if self.__density_upper_threshold is None
+                else self.__density_upper_threshold
+            ),
+            figsize=figsize,
+        )
 
     def plot_data_quality_scatter(self, figsize=(6, 5)):
         """
@@ -2079,28 +1940,15 @@ possible timezone misalignment  {timezone_status}
         :return: The figure containing the scatter plot of data quality scores.
         :rtype: matplotlib.figure.Figure
         """
-        fig = plt.figure(figsize=figsize)
-        labels = self.daily_scores.quality_clustering
-        for lb in set(labels):
-            plt.scatter(
-                self.daily_scores.density[labels == lb],
-                self.daily_scores.linearity[labels == lb],
-                marker=".",
-                label=lb,
-            )
-        plt.xlabel("density score")
-        plt.ylabel("linearity score")
-        plt.axhline(
+        return _plots._plot_data_quality_scatter(
+            self.daily_scores.density,
+            self.daily_scores.linearity,
+            self.daily_scores.quality_clustering,
             self.__linearity_threshold,
-            linewidth=1,
-            color="red",
-            ls=":",
-            label="decision boundary",
+            self.__density_upper_threshold,
+            self.__density_lower_threshold,
+            figsize,
         )
-        plt.axvline(self.__density_upper_threshold, linewidth=1, color="red", ls=":")
-        plt.axvline(self.__density_lower_threshold, linewidth=1, color="red", ls=":")
-        plt.legend()
-        return fig
 
     def plot_daily_energy(self, flag=None, figsize=(8, 6), units=None):
         """
@@ -2130,56 +1978,20 @@ possible timezone misalignment  {timezone_status}
         energy = self.daily_signals.energy * unit_scale(
             source_units, units, ENERGY_TO_WH
         )
-        fig = plt.figure(figsize=figsize)
         try:
             xs = self.day_index.to_pydatetime()
         except AttributeError:
             xs = np.arange(len(self.daily_signals.density))
-        plt.plot(xs, energy, linewidth=1)
-        electrical = source_units in ENERGY_TO_WH
-        title = "Daily energy production" if electrical else "Daily signal integral"
-        if flag == "good":
-            plt.plot(
-                xs[self.daily_flags.no_errors],
-                energy[self.daily_flags.no_errors],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", good days flagged"
-        elif flag == "bad":
-            plt.plot(
-                xs[~self.daily_flags.no_errors],
-                energy[~self.daily_flags.no_errors],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", bad days flagged"
-        elif flag in ["clear", "sunny"]:
-            plt.plot(
-                xs[self.daily_flags.clear],
-                energy[self.daily_flags.clear],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", clear days flagged"
-        elif flag == "cloudy":
-            plt.plot(
-                xs[self.daily_flags.cloudy],
-                energy[self.daily_flags.cloudy],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", cloudy days flagged"
-        plt.title(title)
-        plt.gcf().autofmt_xdate()
-        plt.xlabel("Date")
-        label = "Energy" if electrical else "Integral"
-        plt.ylabel(f"{label} ({units})" if units is not None else label)
-        return fig
+        flagged, suffix = _select_daily_plot_flag(self.daily_flags, flag)
+        return _plots._plot_daily_energy(
+            xs,
+            energy,
+            electrical=source_units in ENERGY_TO_WH,
+            units=units,
+            flagged=flagged,
+            suffix=suffix,
+            figsize=figsize,
+        )
 
     def plot_clipping(self, figsize=(10, 8)):
         """
@@ -2198,40 +2010,18 @@ possible timezone misalignment  {timezone_status}
             return
         if self.daily_scores.clipping_1 is None:
             return
-        fig, ax = plt.subplots(nrows=2, figsize=figsize, sharex=True)
-        clip_stat_1 = self.daily_scores.clipping_1
-        clip_stat_2 = self.daily_scores.clipping_2
-        clipped_days = self.daily_flags.inverter_clipped
         try:
             xs = self.day_index.to_pydatetime()
         except AttributeError:
             xs = np.arange(len(self.daily_signals.density))
-        ax[0].plot(xs, clip_stat_1)
-        ax[1].plot(xs, clip_stat_2)
-        if self.inverter_clipping:
-            ax[0].plot(
-                xs[clipped_days],
-                clip_stat_1[clipped_days],
-                ls="none",
-                marker=".",
-                color="red",
-                label="days with inverter clipping",
-            )
-            ax[1].plot(
-                xs[clipped_days],
-                clip_stat_2[clipped_days],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            ax[0].legend()
-        ax[0].set_title("Clipping Score 1: ratio of daily max to overal max")
-        ax[1].set_title(
-            "Clipping Score 2: fraction of daily energy generated at daily max power"
+        return ClippingDetection._plot_scores(
+            xs,
+            self.daily_scores.clipping_1,
+            self.daily_scores.clipping_2,
+            self.daily_flags.inverter_clipped,
+            self.inverter_clipping,
+            figsize,
         )
-        ax[1].set_xlabel("Date")
-        plt.gcf().autofmt_xdate()
-        return fig
 
     def plot_daily_max_pdf(self, figsize=(8, 6)):
         """
@@ -2333,43 +2123,11 @@ possible timezone misalignment  {timezone_status}
         :rtype: matplotlib.figure.Figure
         """
         if self.time_shift_analysis is not None:
-            use_ixs = self.time_shift_analysis.use_ixs
-            plt.figure(figsize=figsize)
-            plt.plot(
+            return self.time_shift_analysis._plot_detection(
                 self.day_index,
-                self.time_shift_analysis.metric,
-                linewidth=1,
-                alpha=0.6,
-                label="daily solar noon",
+                figsize=figsize,
+                show_filter=show_filter,
             )
-            if show_filter:
-                plt.plot(
-                    self.day_index[use_ixs],
-                    self.time_shift_analysis.metric[use_ixs],
-                    linewidth=1,
-                    alpha=0.6,
-                    color="orange",
-                    marker=".",
-                    ls="none",
-                    label="filtered days",
-                )
-            plt.plot(
-                self.day_index,
-                self.time_shift_analysis.s1,
-                color="green",
-                label="shift detector",
-            )
-            plt.plot(
-                self.day_index,
-                self.time_shift_analysis.s1 + self.time_shift_analysis.s2,
-                color="red",
-                label="signal model",
-                ls="--",
-            )
-            # plt.ylim(11, 13)
-            plt.legend()
-            fig = plt.gcf()
-            return fig
         else:
             print(
                 "Please run the time shift analysis first by setting 'fix_shifts=True' when "
@@ -2411,42 +2169,7 @@ possible timezone misalignment  {timezone_status}
         circ_data = (
             (self.start_doy + np.arange(self.num_days)[slct]) % 365 * 2 * np.pi / 365
         )
-        circ_hist = np.histogram(circ_data, bins=num_bins)
-        fig = plt.figure(figsize=figsize)
-        ax = fig.add_axes([0.1, 0.1, 0.8, 0.8], polar=True)
-        start = (circ_hist[1][0] + circ_hist[1][1]) / 2
-        end = (circ_hist[1][-1] + circ_hist[1][-2]) / 2
-        theta = np.linspace(start, end, num_bins)
-        radii = circ_hist[0]
-        width = 2 * np.pi / num_bins
-        bars = ax.bar(theta, radii, width=width, bottom=0.0, edgecolor="none")
-        for r, bar in zip(radii, bars):
-            bar.set_facecolor(cm.magma(r / np.max(circ_hist[0])))
-            bar.set_alpha(0.75)
-        ax.set_theta_zero_location("N")
-        ax.set_theta_direction(-1)
-        ax.set_rorigin(-2.0)
-        ax.set_rlabel_position(0)
-        ax.set_xticks(np.linspace(0, 2 * np.pi, 12, endpoint=False))
-        ax.set_xticklabels(
-            [
-                "Jan",
-                "Feb",
-                "Mar",
-                "Apr",
-                "May",
-                "Jun",
-                "Jul",
-                "Aug",
-                "Sep",
-                "Oct",
-                "Nov",
-                "Dec",
-            ]
-        )
-        ax.set_title(title)
-        # print(np.sum(circ_hist[0] <= 1))
-        return fig
+        return _plots._plot_circular_distribution(circ_data, num_bins, figsize, title)
 
     def apply_time_dilation(self, nvals_dil=101):
         # Apply time dilation
@@ -2584,39 +2307,9 @@ possible timezone misalignment  {timezone_status}
         )
         # shape: (101, ndays)
 
-        if aggregate:
-            # Drop Feb 29 entries
-            leap_day_mask = np.logical_and(
-                self.day_index.month == 2, self.day_index.day == 29
-            )
-            valid_days_mask = ~leap_day_mask
-            valid_day_index = self.day_index[valid_days_mask]
-            valid_matrix = dilated_matrix[:, valid_days_mask]  # shape: (101, N')
-
-            # Create 365-day vector for day-of-year (1–365, excluding Feb 29)
-            doy = np.copy(valid_day_index.dayofyear.to_numpy())
-            doy[doy > 59] -= 1  # adjust for removed Feb 29
-
-            # Aggregate using nanmedian for robustness to missing data
-            data_for_bundt = np.zeros((365, dilation.nvals_dil))
-            data_for_bundt[:] = np.nan  # initialize with NaNs
-
-            for day in range(1, 366):
-                same_day_mask = doy == day
-                if np.any(same_day_mask):
-                    # shape: (101, n_years_for_day)
-                    day_data = valid_matrix[:, same_day_mask]
-                    data_for_bundt[day - 1] = np.nanmedian(day_data, axis=1)
-        else:
-            start_day = skip
-            end_day = skip + 365
-            data = dilated_matrix[:, start_day:end_day]
-            if data.shape[1] < 365:
-                # Pad with zeros if not enough days
-                pad = 365 - data.shape[1]
-                data = np.pad(data, ((0, 0), (0, pad)), constant_values=0)
-            data_for_bundt = data.T  # shape: (365, 101)
-
+        data_for_bundt = _plots._prepare_bundt_data(
+            dilated_matrix, self.day_index, aggregate=aggregate, skip=skip
+        )
         fig = plot_bundt_cake(
             data_for_bundt * scale,
             figsize=figsize,
