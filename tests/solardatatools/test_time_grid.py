@@ -204,6 +204,12 @@ def test_fractional_grid_through_pipeline_and_profiler(monkeypatch, strict):
         analysis.sunup_mask_estimated = np.broadcast_to(
             (hours >= 6) & (hours < 18), matrix.shape
         )
+        analysis.sunrise_estimates = np.full(matrix.shape[1], 6)
+        analysis.sunset_estimates = np.full(matrix.shape[1], 18)
+
+    def set_scores(handler, **kwargs):
+        handler.daily_scores.density = np.ones(4)
+        handler.daily_scores.linearity = np.zeros(4)
 
     def set_flags(handler, **kwargs):
         handler.daily_flags.no_errors = np.ones(4, dtype=bool)
@@ -217,8 +223,8 @@ def test_fractional_grid_through_pipeline_and_profiler(monkeypatch, strict):
     monkeypatch.setattr(SunriseSunset, "calculate_times", daylight)
     monkeypatch.setattr(TimeShift, "run", apply_fit)
     monkeypatch.setattr(DataHandler, "get_daily_flags", set_flags)
+    monkeypatch.setattr(DataHandler, "get_daily_scores", set_scores)
     for method in (
-        "get_daily_scores",
         "detect_clear_days",
         "clipping_check",
         "capacity_clustering",

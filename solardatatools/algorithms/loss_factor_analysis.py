@@ -13,6 +13,8 @@ corrupted).
 Author: Bennet Meyers
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -23,6 +25,9 @@ import gfosd.components as comp
 from gfosd.components.base_graph_class import GraphComponent
 from tqdm import tqdm
 from solardatatools._units import ENERGY_TO_WH, unit_scale
+
+
+_SHORT_RECORD_WARNING = "Loss factor analysis on one year or less can be unreliable."
 
 
 class LossFactorAnalysis:
@@ -53,9 +58,7 @@ class LossFactorAnalysis:
         self.energy_units = energy_units
         self.energy_data = energy_data
         if len(self.energy_data) <= 365:
-            print(
-                "WARNING: This technique is not designed for use on less than one year of data!"
-            )
+            warnings.warn(_SHORT_RECORD_WARNING, UserWarning, stacklevel=2)
         log_energy = np.zeros_like(self.energy_data)
         is_zero = np.isclose(energy_data, 0, atol=1e-1)
         log_energy[is_zero] = np.nan
@@ -245,6 +248,19 @@ class LossFactorAnalysis:
             + self.outage_energy_loss,
         )
         return
+
+    def _clear_sky_factors(self, num_days):
+        """Expose the legacy fit's daily degradation and soiling by role."""
+        model = self.energy_model
+        if model is None or np.shape(model) != (5, num_days):
+            return None
+        factors = {"degradation": model[1], "soiling": model[2]}
+        if any(
+            not np.all(np.isfinite(factor) & (factor > 0))
+            for factor in factors.values()
+        ):
+            return None
+        return factors
 
     def report(self):
         """

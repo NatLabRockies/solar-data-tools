@@ -101,6 +101,19 @@ for creating a summary table of all data sets.
 dh.report(return_values=True, verbose=False)
 ```
 
+After a partial run, the report keeps the metrics that are available and uses
+`None` for unavailable results. For example, `time shift correction` is
+`False` when a successful fit finds no shift and `None` when the fit fails
+or was not requested. The `stage outcomes` mapping records each stage's
+status, reason, and elapsed seconds. A usable fallback includes the reason
+it was used. Dask includes the same outcomes in its per-key report and
+writes them as JSON in the CSV output.
+
+Every call to `run_pipeline()` starts a fresh result attempt. Source data
+and explicit input preprocessing, such as `fix_dst()`, carry forward to the
+next attempt. If daylight estimation fails after observations are prepared,
+`dh.plot_heatmap(matrix="raw")` is still available for inspecting the data.
+
 ### Sampling intervals and timestamp snapping
 
 Use an exact fixed sampling interval that divides a 24-hour day, such as

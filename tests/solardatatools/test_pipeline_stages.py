@@ -15,7 +15,7 @@ def test_pipeline_preserves_stage_order_and_options(monkeypatch, fix_shifts):
     handler = DataHandler(source)
     calls = []
     filled = handler.make_filled_data_matrix
-    embed_extra = handler.generate_extra_matrix
+    embed_extra = handler._embed_extra_matrix
     provisional_mask = np.zeros((24, 2), dtype=bool)
     provisional_mask[7:17] = True
     corrected_mask = np.roll(provisional_mask, int(fix_shifts), axis=0)
@@ -31,6 +31,8 @@ def test_pipeline_preserves_stage_order_and_options(monkeypatch, fix_shifts):
             handler.boolean_masks.missing_values, np.isnan(data)
         )
         analysis.threshold = 0.023
+        analysis.sunrise_estimates = np.full(2, 7)
+        analysis.sunset_estimates = np.full(2, 17)
         analysis.sunup_mask_estimated = provisional_mask
 
     def fill(**kwargs):
@@ -40,6 +42,15 @@ def test_pipeline_preserves_stage_order_and_options(monkeypatch, fix_shifts):
     def record(name):
         def run(**kwargs):
             calls.append((name, kwargs))
+            if name == "quality scores":
+                handler.daily_scores.density = np.ones(2)
+                handler.daily_scores.linearity = np.zeros(2)
+            elif name == "quality flags":
+                handler.daily_flags.no_errors = np.ones(2, dtype=bool)
+            elif name == "clear days":
+                handler.daily_flags.clear = np.ones(2, dtype=bool)
+            elif name == "capacity":
+                handler.capacity_changes = False
 
         return run
 
@@ -48,6 +59,7 @@ def test_pipeline_preserves_stage_order_and_options(monkeypatch, fix_shifts):
         if fix_shifts:
             raise RuntimeError("test clipping failure")
         handler.inverter_clipping = False
+        handler.daily_flags.inverter_clipped = np.zeros(2, dtype=bool)
 
     def summarize():
         calls.append(("summary", {}))
@@ -75,7 +87,7 @@ def test_pipeline_preserves_stage_order_and_options(monkeypatch, fix_shifts):
     def align_extra(column):
         calls.append(("extra column", {"column": column}))
         np.testing.assert_array_equal(handler.boolean_masks.daytime, corrected_mask)
-        embed_extra(column)
+        return embed_extra(column)
 
     monkeypatch.setattr(SunriseSunset, "run_optimizer", estimate_daylight)
     monkeypatch.setattr(SunriseSunset, "calculate_times", refresh_daylight)
@@ -87,7 +99,7 @@ def test_pipeline_preserves_stage_order_and_options(monkeypatch, fix_shifts):
     monkeypatch.setattr(handler, "score_data_set", summarize)
     monkeypatch.setattr(handler, "capacity_clustering", record("capacity"))
     monkeypatch.setattr(handler, "auto_fix_time_shifts", correct_clock)
-    monkeypatch.setattr(handler, "generate_extra_matrix", align_extra)
+    monkeypatch.setattr(handler, "_embed_extra_matrix", align_extra)
 
     result = handler.run_pipeline(
         power_col="power",
@@ -170,9 +182,11 @@ def test_pipeline_preserves_stage_order_and_options(monkeypatch, fix_shifts):
     assert handler._ran_pipeline
     assert handler.data_quality_score == 0.75
     assert handler.inverter_clipping is (None if fix_shifts else False)
-    assert handler._error_msg == (
-        "\nclipping check failed: test clipping failure" if fix_shifts else ""
-    )
+    outcome = handler.report(verbose=False, return_values=True)["stage outcomes"][
+        "clipping"
+    ]
+    assert outcome["status"] == ("failed" if fix_shifts else "success")
+    assert outcome["reason"] == ("test clipping failure" if fix_shifts else None)
     sensor = source["sensor"].to_numpy()[24:72].reshape(24, 2, order="F")
     np.testing.assert_array_equal(
         handler.extra_matrices["sensor"], np.roll(sensor, int(fix_shifts), axis=0)

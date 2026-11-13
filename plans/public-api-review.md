@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-12, plotting extraction added and reporting extraction coordinated with DH-07
+- Last revised: 2026-11-12, DH-07 opened for contract review
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -327,10 +327,12 @@ implementation requests.
 
 #### DH-07 — Pipeline continuation loses numerical failure information [P2]
 
-- **Locations:** `run_pipeline`, approximately lines 506–626 and 720;
-  `report`, approximately lines 764–820; downstream stage calls including
-  `run_loss_factor_analysis`, approximately lines 912–939; Dask result collection
-  in `sdt_dask/dask_tool/runner.py`, approximately lines 110–173.
+- **Status, 2026-11-12:** implementation authorized after DH-09. The owner
+  approved the defaults below, focused tests, and independent public-tool review.
+- **Locations at `4472044`:** `DataHandler.run_pipeline` and its private stages,
+  lines 244–803; `report`, lines 805–929; `run_loss_factor_analysis`, lines
+  954–1046; `detect_clear_sky`, lines 2201–2270; Dask per-key result collection
+  in `sdt_dask/dask_tool/runner.py`, lines 85–175.
 - **Finding:** the pipeline catches several stage failures and continues, but
   their outcomes are not consistently preserved in returned reports. A failed
   time-shift analysis sets `time_shifts=None`; `report()` converts this to
@@ -372,7 +374,7 @@ implementation requests.
   attempt before solver preflight with either reset setting. `reset=False`
   may reuse compatible computation, with previous fits and metrics excluded
   from the current attempt. The owner identified no workflow requiring a
-  prior fit to be retained. Implement this contract under DH-07 after DH-08.
+  prior fit to be retained. Implement this contract under DH-07 after DH-09.
 - **Reporting extraction, owner direction 2026-11-12:** coordinate separation
   of report construction and console formatting with this issue's outcome and
   partial-result changes. Retain `DataHandler.report` as the public wrapper;
@@ -408,6 +410,48 @@ implementation requests.
 - **Related:** SD-01/SD-06 define numerical failure results; SD-03/SD-04 define
   usable fallbacks; DH-02 owns correction-state consistency. This item does not
   authorize a new pipeline framework or execution of the proposed checks.
+
+- **Approved decisions from the current-code review, 2026-11-12:**
+  1. **Exception boundary.** Retain documented caller-facing input
+     exceptions and capture their outcomes before re-raising. Record expected
+     numerical failures and missing prerequisites in the attempt report.
+     Adapt existing solvers and analysis classes at their current boundaries.
+     Preserve any usable fallback with explicit provenance and integrate the
+     native result contract when SD-01/SD-06 land.
+  2. **Daylight and continuation.** The filling coverage check requires a
+     provisional daylight mask even with `zero_night=False`. Keep
+     that check, retain observation diagnostics and the raw heatmap, and skip
+     analyses that require a usable filled matrix when preparation or filling
+     cannot produce one. On final daylight failure, keep valid earlier results
+     and align extra matrices on the accepted clock. Mark final bounds and
+     daylight-dependent products unavailable, including extra-column quality
+     scores. Provisional bounds have a different purpose and can be on a
+     different clock. **Owner-approved fallback:** if clear-day selection
+     fails and quality flags are usable, a requested clock fit may use its
+     existing all-good-days selection. Preserve the clear-day failure in the
+     report. Record a usable clock fit from that selection as a warned
+     fallback, with the selection reason. If the fallback fit itself fails,
+     record the clock fit failure.
+  3. **Report compatibility.** Preserve metric keys and units and
+     add a `stage outcomes` mapping to the handler report. Carry that mapping
+     into the per-key Dask result and serialize it as JSON in CSV. Keep the
+     legacy Dask error fields as summaries derived from the same outcomes.
+     Return partial metrics even when some requested work fails, including
+     when `run_pipeline` raises after publishing an attempt. Preserve the
+     pre-run `report()` behavior and keep `verbose=False` quiet.
+  4. **Optional downstream analyses.** Skip loss analysis when
+     requested capacity labels are unavailable, and permit it with no labels
+     when `use_capacity_change_labels=False`. With `loss_correction=True`,
+     require a usable current loss fit with named, aligned degradation and
+     soiling factors. Use a small named accessor at the current loss-model
+     boundary pending LFA-06. Record the missing dependency and stop that
+     analysis when the factors are unavailable. Retain the existing Dask
+     duration gate until LFA-06, with the gate's reason visible in the report.
+  5. **Rerun inputs and results.** Preserve source observations and
+     explicit input preprocessing such as DST correction. Rebuild derived
+     results for either reset setting. For raw-matrix construction, keep the
+     supplied data as the source for each attempt so a previous range filter
+     cannot affect a later run. Add no new reuse mechanism in this checkpoint.
 
 #### DH-08 — Extract explicit pipeline stages while preserving established behavior [design proposal]
 
@@ -475,9 +519,10 @@ implementation requests.
 
 #### DH-09 — Extract plotting support while retaining the public handler methods [design proposal]
 
-- **Status and sequence, 2026-11-12:** active. The owner directed continuation
-  with the modified sequence after committing DH-08. DH-09 is its own
-  checkpoint before DH-07, which includes reporting extraction.
+- **Status and sequence, 2026-11-12:** complete. The owner accepted and
+  committed the independently reviewed changes in
+  `447204446bd3b67a9f39f01b129c59a1e1a1afa8`. DH-07 follows with reporting
+  extraction and the approved outcome and reset changes.
 - **Locations:** `DataHandler.plot_*` in `solardatatools/data_handler.py`,
   `solardatatools/plotting.py`, and a private plotting module if needed to keep
   handler-specific support separate from the existing public plotting API.
@@ -5030,3 +5075,49 @@ register.
   additional baseline configurations and retained all 15 public plotting
   signatures. Ruff and `git diff --check` passed. Joblib reported a local
   physical-core detection warning and used the logical-core count.
+
+### 2026-11-12 — DH-09 completed and DH-07 confirmed next
+
+- **Completion:** the owner accepted and committed DH-09 on `cleanup` in
+  `447204446bd3b67a9f39f01b129c59a1e1a1afa8`. The final independent public-tool
+  review reported no findings and passed 20 plotting and units tests. The
+  focused builder run passed 53 tests. The approved density-band display
+  correction is included in the commit.
+- **Next:** DH-07 implements current-attempt stage outcomes, dependency-aware
+  continuation, reset semantics, and partial results. Extract report
+  construction and formatting in the same checkpoint so console, handler,
+  and Dask reports use the same outcome interpretation.
+
+### 2026-11-12 — DH-07 opened for contract review
+
+- **Baseline:** reviewed `4472044` against the approved DH-07 contract.
+  The issue entry records open decisions on exceptions, daylight and clock
+  dependencies, report compatibility, optional analyses, and rerun inputs.
+- **Owner decision:** after clear-day selection fails, use the existing
+  all-good-days selection for a requested clock fit when quality flags remain
+  usable. Report the clear-day failure and qualify any accepted clock fit as
+  a warned fallback.
+- **Scope:** plan review and decisions before source or test edits.
+
+### 2026-11-12 — DH-07 implementation authorized
+
+- **Owner decision:** use the proposed exception, dependency, reporting, optional
+  analysis, and rerun defaults. Use all good days for clock fitting after a
+  clear-day failure when quality flags remain usable, with a reported fallback.
+- **Scope:** implement the contract with focused tests and independent
+  public-tool review. LFA-06 owns removal of the Dask duration gate.
+- **Implementation checkpoint:** each pipeline attempt starts before preflight
+  and rebuilds derived state. Machine-readable reports retain available metrics
+  and stage outcomes. The Dask summary uses the same outcome meanings and
+  writes them as JSON in CSV. The handler preserves aligned extra matrices
+  after a failed final daylight refresh, and limits daylight-dependent work
+  to attempts with usable final bounds.
+- **Profiler dependency:** handler setup records a skip when a requested
+  optimized mode needs unavailable final bounds. Explicit solar-noon and
+  daylight modes that derive their inputs from the matrix can still run when
+  their required data and day flags are available.
+- **Verification checkpoint:** `pytest -v tests` passed 106 tests with two
+  skips on Python 3.13.11. All three Dask tests passed separately on Python
+  3.12.11 with the synchronous scheduler, including CSV JSON round-tripping
+  and continuation after a per-key failure. Ruff and `git diff --check`
+  passed. No live cluster or solver license was needed for failure injection.

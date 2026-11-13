@@ -5,16 +5,14 @@ This module contains a class for managing a data processing pipeline
 
 """
 
-from time import time
+from time import perf_counter
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import cvxpy as cvx
 from sklearn.cluster import DBSCAN
-import traceback
-import sys
 import warnings
-from tqdm import tqdm
+from solardatatools import _reporting
 from solardatatools._time_grid import (
     DAY,
     calendar_grid,
@@ -49,6 +47,7 @@ from solardatatools.algorithms import (
     Dilation,
     ClearSkyDetection,
 )
+from solardatatools.algorithms.loss_factor_analysis import _SHORT_RECORD_WARNING
 from pandas.plotting import register_matplotlib_converters
 
 register_matplotlib_converters()
@@ -64,6 +63,29 @@ def _select_daily_plot_flag(daily_flags, flag):
     if flag == "cloudy":
         return daily_flags.cloudy, ", cloudy days flagged"
     return None, ""
+
+
+_PIPELINE_STAGES = (
+    "solver preflight",
+    "observation preparation",
+    "provisional daylight",
+    "matrix filling",
+    "daily scores",
+    "daily flags",
+    "clear days",
+    "clipping",
+    "dataset scores",
+    "capacity change",
+    "time shift",
+    "final daylight",
+    "extra matrices",
+    "extra quality",
+)
+_USABLE = {"success", "warned fallback"}
+
+
+class _UnavailableResult(RuntimeError):
+    """A stage returned without a usable result."""
 
 
 class DataHandler:
@@ -163,7 +185,12 @@ class DataHandler:
             self.data_frame_raw = None
             self.data_frame = None
             self.keys = None
-        self.raw_data_matrix = raw_data_matrix
+        self._source_matrix = (
+            None if raw_data_matrix is None else np.array(raw_data_matrix, copy=True)
+        )
+        self.raw_data_matrix = (
+            None if self._source_matrix is None else self._source_matrix.copy()
+        )
         self.sampling_interval = None
         if self.raw_data_matrix is not None:
             rows = self.raw_data_matrix.shape[0]
@@ -178,6 +205,7 @@ class DataHandler:
             self.num_days = None
             self.data_sampling = None
         self.gmt_offset = gmt_offset
+        self.__fix_dst_ran = False
         self._initialize_attributes()
 
     def _initialize_attributes(self):
@@ -230,6 +258,7 @@ class DataHandler:
         self.polar_transform = None
         self.loss_analysis = None
         self.clearsky_object = None
+        self.clearsky_sig = None
         self.quantile_object = None
         self.dilation_object = None
         self.sig_dilated = None
@@ -239,7 +268,85 @@ class DataHandler:
         self.__density_lower_threshold = None
         self.__density_upper_threshold = None
         self.__linearity_threshold = None
-        self.__fix_dst_ran = False
+        self._stage_outcomes = {}
+        self.total_time = None
+
+    def _record_stage(self, name, status, reason=None, elapsed=0.0):
+        self._stage_outcomes[name] = {
+            "status": status,
+            "reason": reason,
+            "elapsed seconds": elapsed,
+        }
+
+    def _run_stage(
+        self,
+        name,
+        action,
+        *,
+        requires=(),
+        enabled=True,
+        fallback=None,
+        propagate=(),
+        validate=None,
+    ):
+        if not enabled:
+            self._record_stage(name, "unrequested", "Not requested.")
+            return False
+        missing = [
+            stage
+            for stage in requires
+            if self._stage_outcomes[stage]["status"] not in _USABLE
+        ]
+        if missing:
+            self._record_stage(name, "skipped", "Requires " + ", ".join(missing) + ".")
+            return False
+        started = perf_counter()
+        validating = validate is not None
+        try:
+            if validating:
+                validate()
+                validating = False
+            action()
+        except Exception as error:
+            reason = str(error) or type(error).__name__
+            self._record_stage(name, "failed", reason, perf_counter() - started)
+            self._error_msg += f"\n{name}: {reason}"
+            if validating or isinstance(error, propagate):
+                raise
+            return False
+        self._record_stage(
+            name,
+            "warned fallback" if fallback else "success",
+            fallback,
+            perf_counter() - started,
+        )
+        return True
+
+    def _start_pipeline_attempt(self, units, *, fix_shifts, extra_cols):
+        self._initialize_attributes()
+        self.data_frame = None
+        self.raw_data_matrix = None
+        self.num_days = None
+        self.data_sampling = None
+        self.sampling_interval = None
+        self.power_units = units
+        requested = {
+            "time shift": fix_shifts,
+            "extra matrices": extra_cols is not None,
+            "extra quality": extra_cols is not None,
+        }
+        for name in _PIPELINE_STAGES:
+            if requested.get(name, True):
+                self._record_stage(
+                    name, "skipped", "Pipeline stopped before this stage."
+                )
+            else:
+                self._record_stage(name, "unrequested", "Not requested.")
+        for name in ("loss analysis", "clear sky"):
+            self._record_stage(name, "unrequested", "Not requested.")
+
+    def _stage_usable(self, name):
+        return self._stage_outcomes.get(name, {}).get("status") in _USABLE
 
     def run_pipeline(
         self,
@@ -344,7 +451,7 @@ class DataHandler:
         :type solver: str, default="CLARABEL"
         :param solver_convex: Solver to use for convex optimization tasks.
         :type solver_convex: str, default="CLARABEL"
-        :param reset: Whether to reset the pipeline's internal state before running.
+        :param reset: Retained for compatibility. Both settings start a fresh result attempt.
         :type reset: bool, default=True
         :param sampling_interval: Fixed duration for the observation grid. If
                                   omitted, use the timestamp cadence.
@@ -355,172 +462,102 @@ class DataHandler:
         :rtype: NoneType
 
         :note:
+            Each call starts a new result attempt. Use
+            ``report(return_values=True, verbose=False)`` for partial metrics
+            and stage outcomes after a failed or incomplete run.
             If using the MOSEK solver, ensure that a valid license is available.
             ``raw_data_matrix`` and ``boolean_masks.missing_values`` stay on
             the observation clock during relative clock correction. The
             timezone advisory is based on the observed data before filling.
         """
 
-        if correct_tz is not None:
-            warnings.warn(
-                "correct_tz is deprecated and no longer adjusts timestamps. Omit it.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if verbose:
-            print(
-                """
-            *********************************************
-            * Solar Data Tools Data Onboarding Pipeline *
-            *********************************************
-
-            This pipeline runs a series of preprocessing, cleaning, and quality
-            control tasks on stand-alone PV power or irradiance time series data.
-            After the pipeline is run, the data may be plotted, filtered, or
-            further analyzed.
-
-            Authors: Bennet Meyers and Sara Miskovich, SLAC
-
-            (Tip: if you have a mosek [https://www.mosek.com/] license and have it
-            installed on your system, try setting solver='MOSEK' for a speedup)
-
-            This material is based upon work supported by the U.S. Department
-            of Energy's Office of Energy Efficiency and Renewable Energy (EERE)
-            under the Solar Energy Technologies Office Award Number 38529.\n
-            """
-            )
-        if solver == "MOSEK":
-            # Set all problems to use MOSEK
-            # and check that MOSEK is installed
-            solver_convex = "MOSEK"
-            try:
-                x = cvx.Variable()
-                prob = cvx.Problem(cvx.Minimize(cvx.sum_squares(x)))
-                prob.solve(solver="MOSEK")
-            except Exception as e:
-                print("VALID MOSEK LICENSE NOT AVAILABLE")
-                print(
-                    "please check that your license file is in [HOME]/mosek and is current\n"
+        self._start_pipeline_attempt(
+            units, fix_shifts=fix_shifts, extra_cols=extra_cols
+        )
+        started = perf_counter()
+        try:
+            if correct_tz is not None:
+                warnings.warn(
+                    "correct_tz is deprecated and no longer adjusts timestamps. Omit it.",
+                    DeprecationWarning,
+                    stacklevel=2,
                 )
-                print("error msg:", e)
-                return
-        if reset:
-            self._initialize_attributes()
-        self.daily_scores = DailyScores()
-        self.daily_flags = DailyFlags()
-        self.capacity_analysis = None
-        self.time_shift_analysis = None
-        self.time_shifts = None
-        self.extra_matrices = {}  # Matrix views of extra columns
-        self.extra_quality_scores = {}
-        self.power_units = units
-        self.tz_correction = 0
-        self.possible_timezone_misalignment = None
-        self.time_axis_diagnostics = None
-
-        t = np.zeros(6)
-        t[0] = time()
-        progress = tqdm(desc="task list", total=7, ncols=80) if verbose else None
-        if not self._prepare_observations(
-            power_col,
-            min_val=min_val,
-            max_val=max_val,
-            start_day_ix=start_day_ix,
-            end_day_ix=end_day_ix,
-            sampling_interval=sampling_interval,
-            snap_tolerance=snap_tolerance,
-            verbose=verbose,
-            progress=progress,
-        ):
-            return
-        if verbose:
-            progress.update()
-        self._estimate_provisional_daylight(
-            random_seed=sunrise_sunset_random_seed,
-            solver=solver_convex,
-            verbose=verbose,
-        )
-
-        t[1] = time()
-        if verbose:
-            progress.update()
-        if not self._fill_observations(
-            zero_night=zero_night, interp_day=interp_day, verbose=verbose
-        ):
-            return
-
-        t[2] = time()
-        if verbose:
-            progress.update()
-        t_clean = self._score_and_analyze_days(
-            density_lower_threshold=density_lower_threshold,
-            density_upper_threshold=density_upper_threshold,
-            linearity_threshold=linearity_threshold,
-            clear_day_smoothness_param=clear_day_smoothness_param,
-            clear_day_energy_param=clear_day_energy_param,
-            solver=solver,
-            solver_convex=solver_convex,
-            verbose=verbose,
-        )
-
-        t[3] = time()
-        if verbose:
-            progress.update()
-        self._correct_clock_and_refresh_daylight(
-            fix_shifts=fix_shifts,
-            round_shifts_to_hour=round_shifts_to_hour,
-            time_shift_weight_change_detector=time_shift_weight_change_detector,
-            time_shift_weight_seasonal=time_shift_weight_seasonal,
-            solar_noon_estimator=solar_noon_estimator,
-            daytime_threshold=daytime_threshold,
-            periodic_detector=periodic_detector,
-            solver=solver,
-            solver_convex=solver_convex,
-            verbose=verbose,
-        )
-
-        t[4] = time()
-        if verbose:
-            progress.update()
-        self._align_extra_columns(extra_cols)
-        t[5] = time()
-        times = np.diff(t, n=1)
-        cleaning_times = np.diff(t_clean, n=1)
-        total_time = t[-1] - t[0]
-        # Cleanup
-        if verbose:
-            progress.update()
-            progress.close()
-            print("\n")
-            out = "total time: {:.2f} seconds\n"
-            out += "--------------------------------\n"
-            out += "Breakdown\n"
-            out += "--------------------------------\n"
-            out += "Preprocessing              {:.2f}s\n"
-            out += "Cleaning                   {:.2f}s\n"
-            out += "Filtering/Summarizing      {:.2f}s\n"
-            out += "    Data quality           {:.2f}s\n"
-            out += "    Clear day detect       {:.2f}s\n"
-            out += "    Clipping detect        {:.2f}s\n"
-            out += "    Capacity change detect {:.2f}s\n"
-            if extra_cols is not None:
-                out += "Extra Column Processing    {:.2f}s"
-            print(
-                out.format(
-                    total_time,
-                    times[0],
-                    times[1] + times[3],
-                    times[2],
-                    cleaning_times[0],
-                    cleaning_times[1],
-                    cleaning_times[2],
-                    cleaning_times[4],
-                    times[4],
+            if verbose:
+                print(_reporting.PIPELINE_BANNER)
+            if solver == "MOSEK":
+                solver_convex = "MOSEK"
+                if not self._run_stage("solver preflight", self._check_mosek):
+                    return
+            else:
+                self._record_stage(
+                    "solver preflight", "unrequested", "No solver preflight required."
                 )
+            self._run_stage(
+                "observation preparation",
+                lambda: self._prepare_observations(
+                    power_col,
+                    min_val=min_val,
+                    max_val=max_val,
+                    start_day_ix=start_day_ix,
+                    end_day_ix=end_day_ix,
+                    sampling_interval=sampling_interval,
+                    snap_tolerance=snap_tolerance,
+                    verbose=verbose,
+                ),
+                propagate=(ValueError, TypeError, KeyError),
             )
-        self._ran_pipeline = True
-        self.total_time = total_time
-        return
+            self._run_stage(
+                "provisional daylight",
+                lambda: self._estimate_provisional_daylight(
+                    random_seed=sunrise_sunset_random_seed,
+                    solver=solver_convex,
+                ),
+                requires=("observation preparation",),
+            )
+            self._run_stage(
+                "matrix filling",
+                lambda: self._fill_observations(
+                    zero_night=zero_night, interp_day=interp_day
+                ),
+                requires=("provisional daylight",),
+            )
+            self._score_and_analyze_days(
+                density_lower_threshold=density_lower_threshold,
+                density_upper_threshold=density_upper_threshold,
+                linearity_threshold=linearity_threshold,
+                clear_day_smoothness_param=clear_day_smoothness_param,
+                clear_day_energy_param=clear_day_energy_param,
+                solver=solver,
+                solver_convex=solver_convex,
+            )
+            self._correct_clock_and_refresh_daylight(
+                fix_shifts=fix_shifts,
+                round_shifts_to_hour=round_shifts_to_hour,
+                time_shift_weight_change_detector=time_shift_weight_change_detector,
+                time_shift_weight_seasonal=time_shift_weight_seasonal,
+                solar_noon_estimator=solar_noon_estimator,
+                daytime_threshold=daytime_threshold,
+                periodic_detector=periodic_detector,
+                solver=solver,
+                solver_convex=solver_convex,
+            )
+            self._align_extra_columns(extra_cols)
+        finally:
+            self._ran_pipeline = True
+            self.total_time = perf_counter() - started
+            if verbose:
+                print(f"Pipeline elapsed time: {self.total_time:.2f} seconds")
+                if details := _reporting.format_outcomes(self._stage_outcomes):
+                    print(details)
+
+    @staticmethod
+    def _check_mosek():
+        try:
+            x = cvx.Variable()
+            problem = cvx.Problem(cvx.Minimize(cvx.sum_squares(x)))
+            problem.solve(solver="MOSEK")
+        except Exception as error:
+            raise _UnavailableResult(f"MOSEK preflight failed: {error}") from error
 
     def _prepare_observations(
         self,
@@ -533,7 +570,6 @@ class DataHandler:
         sampling_interval,
         snap_tolerance,
         verbose,
-        progress,
     ):
         """Establish the observation grid and record its pre-fill diagnostics."""
         if self.data_frame_raw is not None:
@@ -542,8 +578,7 @@ class DataHandler:
             if power_col is None:
                 power_col = self.data_frame_raw.columns[0]
             if power_col not in self.data_frame_raw.columns:
-                print("Power column key not present in data frame.")
-                return False
+                raise _UnavailableResult("Power column key not present in data frame.")
             # Check that data frame has a reasonable amount of data, you can't have a reasonable time series with less
             # than 24 actual measured values. This number could probably be bumped up to be honest.
             if np.sum(self.data_frame_raw[power_col].values >= 0) < 24:
@@ -559,8 +594,6 @@ class DataHandler:
                 snap_tolerance=snap_tolerance,
                 return_diagnostics=True,
             )
-        if verbose:
-            progress.update()
         # Embed the data as a matrix, with days in columns. Also, set some
         # attributes, like the scan rate, day index, and day of year arary.
         # Almost never use start_day_ix and end_day_ix, but they're there
@@ -569,6 +602,13 @@ class DataHandler:
             self.make_data_matrix(
                 power_col, start_day_ix=start_day_ix, end_day_ix=end_day_ix
             )
+        elif self._source_matrix is not None:
+            self.raw_data_matrix = self._source_matrix.copy()
+            rows, self.num_days = self.raw_data_matrix.shape
+            self.sampling_interval = pd.Timedelta(DAY.value // rows, unit="ns")
+            self.data_sampling = 1440 / rows
+        else:
+            raise ValueError("Provide a data frame or a raw data matrix.")
 
         if max_val is not None:
             mat_copy = np.copy(self.raw_data_matrix)
@@ -582,7 +622,8 @@ class DataHandler:
             slct = mat_copy < min_val
             if np.sum(slct) > 0:
                 self.raw_data_matrix[slct] = np.nan
-        self.capacity_estimate = np.nanquantile(self.raw_data_matrix, 0.95)
+        if not np.isnan(self.raw_data_matrix).all():
+            self.capacity_estimate = np.nanquantile(self.raw_data_matrix, 0.95)
         self.boolean_masks.missing_values = np.isnan(self.raw_data_matrix)
         self.possible_timezone_misalignment = _check_midnight_production(
             self.raw_data_matrix
@@ -594,76 +635,55 @@ class DataHandler:
                 "time. Daylight estimates and daily analyses may be unreliable when "
                 'production crosses midnight. Inspect plot_heatmap(matrix="raw").',
                 UserWarning,
-                stacklevel=3,
+                stacklevel=5,
             )
-        return True
 
-    def _estimate_provisional_daylight(self, *, random_seed, solver, verbose):
-        """Estimate daylight on the observation grid for filling and scoring."""
-        ss = SunriseSunset()
-        try:
-            ss.run_optimizer(
-                self.raw_data_matrix,
-                random_seed=random_seed,
-                plot=False,
-                solver=solver,
+    def _estimate_provisional_daylight(self, *, random_seed, solver):
+        analysis = SunriseSunset()
+        analysis.run_optimizer(
+            self.raw_data_matrix, random_seed=random_seed, plot=False, solver=solver
+        )
+        self._publish_daylight(analysis)
+
+    def _publish_daylight(self, analysis):
+        mask = analysis.sunup_mask_estimated
+        bounds = (analysis.sunrise_estimates, analysis.sunset_estimates)
+        if (
+            np.shape(mask) != self.raw_data_matrix.shape
+            or np.asarray(mask).dtype != bool
+            or any(
+                np.shape(bound) != (self.num_days,) or not np.isfinite(bound).all()
+                for bound in bounds
             )
-            self.boolean_masks.daytime = ss.sunup_mask_estimated
-        except Exception:
-            msg = "Sunrise/sunset detection failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-        self.daytime_analysis = ss
+        ):
+            raise _UnavailableResult(
+                "Daylight fit did not return usable bounds and mask."
+            )
+        self.daytime_analysis = analysis
+        self.boolean_masks.daytime = mask
 
-    def _fill_observations(self, *, zero_night, interp_day, verbose):
-        """Fill the observation matrix and check daylight measurement coverage."""
+    def _fill_observations(self, *, zero_night, interp_day):
         try:
             self.make_filled_data_matrix(zero_night=zero_night, interp_day=interp_day)
         except Exception:
-            msg = "Matrix filling failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-        num_raw_measurements = np.count_nonzero(
-            np.nan_to_num(self.raw_data_matrix, copy=True, nan=0.0)[
-                self.boolean_masks.daytime
-            ]
+            self.filled_data_matrix = None
+            self.daily_signals.energy = None
+            raise
+        daylight = self.boolean_masks.daytime
+        raw = np.count_nonzero(np.nan_to_num(self.raw_data_matrix[daylight], nan=0))
+        filled = np.count_nonzero(
+            np.nan_to_num(self.filled_data_matrix[daylight], nan=0)
         )
-        num_filled_measurements = np.count_nonzero(
-            np.nan_to_num(self.filled_data_matrix, copy=True, nan=0.0)[
-                self.boolean_masks.daytime
-            ]
-        )
-        if num_raw_measurements > 0:
-            ratio = num_filled_measurements / num_raw_measurements
-        else:
-            msg = "Error: no nonzero observations within the estimated daylight window."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
+        if raw == 0 or filled / raw < 0.85:
             self.daily_scores = None
             self.daily_flags = None
-            self.data_quality_score = 0.0
-            self.data_clearness_score = 0.0
-            self._ran_pipeline = True
-            return False
-        if ratio < 0.85:
-            msg = "Error: data was lost during NaN filling procedure. "
-            msg += "Check the input data and daylight estimates.\n"
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                print(f"ratio of filled to raw nonzero measurements was {ratio:.2f}")
-            self.daily_scores = None
-            self.daily_flags = None
-            self.data_quality_score = None
-            self.data_clearness_score = None
-            self._ran_pipeline = True
-            return False
-        return True
+            if raw == 0:
+                raise _UnavailableResult(
+                    "no nonzero observations within the estimated daylight window."
+                )
+            raise _UnavailableResult(
+                f"Data was lost during NaN filling (filled/raw ratio {filled / raw:.2f})."
+            )
 
     def _score_and_analyze_days(
         self,
@@ -675,80 +695,77 @@ class DataHandler:
         clear_day_energy_param,
         solver,
         solver_convex,
-        verbose,
     ):
         """Score and classify days before the optional clock correction."""
-        t_clean = np.zeros(6)
-        t_clean[0] = time()
-        try:
-            # density scoring
+
+        def score_days():
             self.get_daily_scores(threshold=0.2, solver=solver_convex)
-        except Exception:
-            msg = "Daily quality scoring failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.daily_scores = None
-        try:
+            if self.daily_scores.density is None or self.daily_scores.linearity is None:
+                raise _UnavailableResult(
+                    "Daily density or linearity scores are unavailable."
+                )
+
+        def flag_days():
             self.get_daily_flags(
                 density_lower_threshold=density_lower_threshold,
                 density_upper_threshold=density_upper_threshold,
                 linearity_threshold=linearity_threshold,
             )
-        except Exception:
-            msg = "Daily quality flagging failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.daily_flags = None
-        t_clean[1] = time()
-        try:
+            if self.daily_flags.no_errors is None:
+                raise _UnavailableResult("Daily quality flags are unavailable.")
+
+        def clear_days():
             self.detect_clear_days(
                 smoothness_threshold=clear_day_smoothness_param,
                 energy_threshold=clear_day_energy_param,
                 solver=solver_convex,
             )
-        except Exception:
-            msg = "Clear day detection failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-        t_clean[2] = time()
-        try:
+            if self.daily_flags.clear is None:
+                raise _UnavailableResult("Clear-day flags are unavailable.")
+
+        def detect_clipping():
             self.clipping_check(solver=solver_convex)
-        except Exception as e:
-            msg = "clipping check failed: " + str(e)
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.inverter_clipping = None
-        t_clean[3] = time()
-        try:
-            self.score_data_set()
-        except Exception:
-            msg = "Data set summary scoring failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.data_quality_score = None
-            self.data_clearness_score = None
-        t_clean[4] = time()
-        try:
+            if (
+                self.inverter_clipping is None
+                or self.daily_flags.inverter_clipped is None
+            ):
+                raise _UnavailableResult("Clipping results are unavailable.")
+
+        def detect_capacity_change():
             self.capacity_clustering(solver=solver)
-        except TypeError:
-            msg = "Capacity clustering failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.capacity_changes = None
-        t_clean[5] = time()
-        return t_clean
+            if self.capacity_changes is None:
+                raise _UnavailableResult("Capacity change results are unavailable.")
+
+        self._run_stage("daily scores", score_days, requires=("matrix filling",))
+        if not self._run_stage("daily flags", flag_days, requires=("daily scores",)):
+            self.normal_quality_scores = None
+            if self.daily_flags is not None:
+                self.daily_flags.density = self.daily_flags.linearity = (
+                    self.daily_flags.no_errors
+                ) = None
+        if not self._run_stage(
+            "clear days", clear_days, requires=("daily scores", "daily flags")
+        ):
+            self.clear_day_analysis = None
+            if self.daily_flags is not None:
+                self.daily_flags.clear = self.daily_flags.cloudy = None
+        if not self._run_stage("clipping", detect_clipping, requires=("daily flags",)):
+            self.clipping_analysis = None
+            self.inverter_clipping = self.num_clip_points = None
+            if self.daily_flags is not None:
+                self.daily_flags.inverter_clipped = None
+            if self.daily_scores is not None:
+                self.daily_scores.clipping_1 = self.daily_scores.clipping_2 = None
+        if not self._run_stage(
+            "dataset scores", self.score_data_set, requires=("daily flags",)
+        ):
+            self.data_quality_score = self.data_clearness_score = None
+        if not self._run_stage(
+            "capacity change", detect_capacity_change, requires=("daily flags",)
+        ):
+            self.capacity_changes = self.capacity_analysis = None
+            if self.daily_flags is not None:
+                self.daily_flags.capacity_cluster = None
 
     def _correct_clock_and_refresh_daylight(
         self,
@@ -762,45 +779,84 @@ class DataHandler:
         periodic_detector,
         solver,
         solver_convex,
-        verbose,
     ):
-        """Apply the requested clock fit and refresh daylight on the resulting grid."""
-        if fix_shifts:
-            try:
-                self.auto_fix_time_shifts(
-                    round_shifts_to_hour=round_shifts_to_hour,
-                    w1=time_shift_weight_change_detector,
-                    w2=time_shift_weight_seasonal,
-                    estimator=solar_noon_estimator,
-                    threshold=daytime_threshold,
-                    periodic_detector=periodic_detector,
-                    solver=solver,
-                )
-            except Exception as e:
-                msg = "Fix time shift algorithm failed."
-                self._error_msg += "\n" + msg
-                if verbose:
-                    print(msg)
-                    print("Error message:", e)
-                    print("\n")
-                    traceback.print_exception(*sys.exc_info())
-                self.time_shifts = None
+        def fit_clock():
+            self.auto_fix_time_shifts(
+                round_shifts_to_hour=round_shifts_to_hour,
+                w1=time_shift_weight_change_detector,
+                w2=time_shift_weight_seasonal,
+                estimator=solar_noon_estimator,
+                threshold=daytime_threshold,
+                periodic_detector=periodic_detector,
+                solver=solver,
+            )
+            if self.time_shifts is None or (
+                self.time_shifts and self.time_shift_analysis is None
+            ):
+                raise _UnavailableResult("Time shift results are unavailable.")
 
-        # Update daytime detection based on cleaned up data
-        self.daytime_analysis.calculate_times(
-            self.filled_data_matrix, solver=solver_convex
-        )
-        self.boolean_masks.daytime = self.daytime_analysis.sunup_mask_estimated
+        def refresh_daylight():
+            self.daytime_analysis.calculate_times(
+                self.filled_data_matrix, solver=solver_convex
+            )
+            self._publish_daylight(self.daytime_analysis)
+
+        fallback = None
+        if self._stage_outcomes["clear days"]["status"] == "failed":
+            fallback = "Clear-day selection failed. Used all good days."
+        filled = self.filled_data_matrix
+        if not self._run_stage(
+            "time shift",
+            fit_clock,
+            requires=("daily flags",),
+            enabled=fix_shifts,
+            fallback=fallback,
+        ):
+            self.filled_data_matrix = filled
+            self.time_shifts = self.time_shift_analysis = None
+        if not self._run_stage(
+            "final daylight", refresh_daylight, requires=("matrix filling",)
+        ):
+            self.daytime_analysis = None
+            self.boolean_masks.daytime = None
 
     def _align_extra_columns(self, extra_cols):
-        """Align the requested extra signals and score their daylight coverage."""
-        if extra_cols is not None:
-            if isinstance(extra_cols, str):
-                extra_cols = np.atleast_1d(extra_cols)
-            elif isinstance(extra_cols, tuple):
-                extra_cols = [extra_cols]
-            for col in extra_cols:
-                self.generate_extra_matrix(col)
+        if extra_cols is None:
+            return
+
+        def align():
+            if self.data_frame is None:
+                raise _UnavailableResult(
+                    "Extra matrices require timestamped input columns."
+                )
+            columns = (
+                [extra_cols]
+                if isinstance(extra_cols, (str, tuple))
+                else list(extra_cols)
+            )
+            for col in columns:
+                self._run_stage(
+                    f"extra matrix {col!r}", lambda: self._embed_extra_matrix(col)
+                )
+            if not self.extra_matrices and columns:
+                raise _UnavailableResult("No requested extra columns could be aligned.")
+
+        def score():
+            for key in self.extra_matrices:
+                self._score_extra_matrix(key)
+
+        if self._run_stage(
+            "extra matrices", align, requires=("observation preparation",)
+        ):
+            self._run_stage(
+                "extra quality",
+                score,
+                requires=("final daylight",),
+            )
+        else:
+            self._record_stage(
+                "extra quality", "skipped", "Requires aligned extra matrices."
+            )
 
     def report(self, verbose=True, return_values=False):
         """
@@ -838,6 +894,10 @@ class DataHandler:
             - "time zone correction": Always zero during the compatibility transition.
             - "possible timezone misalignment": True when the midnight check flags
               production, False when it finds no evidence, or None when unassessed.
+            - "stage outcomes": Current-attempt statuses, reasons, and elapsed
+              seconds. Skipped and unrequested stages have zero elapsed time.
+
+            Metrics that are unavailable for the current attempt are ``None``.
 
             The dictionary is returned only if `return_values` is True.
         :rtype: dict, optional
@@ -849,84 +909,39 @@ class DataHandler:
             report = my_data_handler.report(verbose=True, return_values=True)
             print(report['capacity'])
         """
-        capacity = self.capacity_estimate
-        capacity_units = self.power_units
-        if capacity_units in POWER_TO_W and capacity is not None:
-            capacity = capacity * unit_scale(capacity_units, "kW", POWER_TO_W)
-            capacity_units = "kW"
-        try:
-            timing = self.time_axis_diagnostics or {}
-            report = {
-                "length": self.num_days / 365,
-                "capacity": capacity if capacity_units == "kW" else None,
-                "sampling": self.data_sampling,
-                "timestamp rejection count": timing.get("rejection_count"),
-                "timestamp collision count": timing.get("collision_count"),
-                "quality score": self.data_quality_score,
-                "clearness score": self.data_clearness_score,
-                "inverter clipping": self.inverter_clipping,
-                "clipped fraction": (
-                    np.sum(self.daily_flags.inverter_clipped)
-                    / len(self.daily_flags.inverter_clipped)
-                ),
-                "capacity change": self.capacity_changes,
-                "data quality warning": self.normal_quality_scores,
-                "time shift correction": (
-                    self.time_shifts if self.time_shifts is not None else False
-                ),
-                "time zone correction": 0,
-                "possible timezone misalignment": self.possible_timezone_misalignment,
-            }
-        except TypeError:
-            if self._ran_pipeline:
-                m1 = "Pipeline failed, please check data set.\n"
-                m2 = "Try running: self.plot_heatmap(matrix='raw')\n\n"
-                if self.num_days >= 365:
-                    l1 = "Length:                {:.2f} years\n".format(
-                        self.num_days / 365
-                    )
-                else:
-                    l1 = "Length:                {} days\n".format(self.num_days)
-                l1_a = f"Capacity estimate:     {capacity:.2f} {capacity_units}\n"
-                if self.raw_data_matrix.shape[0] <= 1440:
-                    l2 = "Data sampling:         {} minute\n".format(self.data_sampling)
-                else:
-                    l2 = "Data sampling:         {} second\n".format(
-                        int(self.data_sampling * 60)
-                    )
-                p_out = m1 + m2 + l1 + l1_a + l2
-                print(p_out)
-                print("\nError messages captured from pipeline:" + self._error_msg)
-                return
-            else:
+        if not self._stage_outcomes:
+            if verbose:
                 print("Please run the pipeline first!")
-                return
+            return None
+        clipped = getattr(self.daily_flags, "inverter_clipped", None)
+        report = _reporting.pipeline_report(
+            num_days=self.num_days,
+            sampling=self.data_sampling,
+            capacity=self.capacity_estimate,
+            units=self.power_units,
+            diagnostics=self.time_axis_diagnostics,
+            quality=self.data_quality_score,
+            clearness=self.data_clearness_score,
+            clipping=self.inverter_clipping,
+            clipped_fraction=np.mean(clipped)
+            if clipped is not None and len(clipped)
+            else None,
+            capacity_change=self.capacity_changes,
+            quality_warning=self.normal_quality_scores,
+            time_shifts=self.time_shifts,
+            timezone_advisory=self.possible_timezone_misalignment,
+            outcomes=self._stage_outcomes,
+        )
         if verbose:
-            timezone_advisory = report["possible timezone misalignment"]
-            timezone_status = (
-                "not assessed" if timezone_advisory is None else timezone_advisory
+            print(
+                _reporting.format_pipeline_report(
+                    report,
+                    capacity=self.capacity_estimate,
+                    units=self.power_units,
+                    has_observations=self.raw_data_matrix is not None,
+                )
             )
-            pout = f"""
------------------
-DATA SET REPORT
------------------
-length               {report["length"]:.2f} years
-capacity estimate    {capacity:.2f} {capacity_units}
-data sampling        {report["sampling"]} minutes
-quality score        {report["quality score"]:.2f}
-clearness score      {report["clearness score"]:.2f}
-inverter clipping    {report["inverter clipping"]}
-clipped fraction     {report["clipped fraction"]:.2f}
-capacity changes     {report["capacity change"]}
-data quality warning {report["data quality warning"]}
-time shift errors    {report["time shift correction"]}
-possible timezone misalignment  {timezone_status}
-            """
-            print(pout)
-        if return_values:
-            return report
-        else:
-            return
+        return report if return_values else None
 
     def fix_dst(self):
         """
@@ -992,14 +1007,17 @@ possible timezone misalignment  {timezone_status}
             Prints the results of the loss factor analysis if `verbose` is `True`.
         :raises ValueError: If the input signal is declared in units other than W or kW.
         """
-        if self._ran_pipeline:
-            if self.power_units not in POWER_TO_W:
-                raise ValueError(
-                    "Loss factor analysis requires power units 'W' or 'kW'."
-                )
-            self.loss_analysis = LossFactorAnalysis(
+        self.loss_analysis = None
+        name = "loss analysis"
+        if not self._ran_pipeline:
+            if verbose:
+                print("Please run pipeline first.")
+            return
+
+        def fit_loss():
+            analysis = LossFactorAnalysis(
                 self.daily_signals.energy,
-                capacity_change_labels=self.capacity_analysis.labels,
+                capacity_change_labels=labels,
                 outage_flags=~self.daily_flags.no_errors,
                 energy_units=self.energy_units,
                 tau=tau,
@@ -1014,36 +1032,56 @@ possible timezone misalignment  {timezone_status}
                 use_capacity_change_labels=use_capacity_change_labels,
             )
             if deg_rate is None:
-                self.loss_analysis.estimate_degradation_rate(verbose=verbose)
-            elif verbose:
-                print("Loading user-provided degradation rate.")
-            if verbose:
-                print("Performing loss factor analysis...")
-            self.loss_analysis.estimate_losses()
-            if verbose:
-                lb = self.loss_analysis.degradation_rate_lb
-                ub = self.loss_analysis.degradation_rate_ub
-                confidence_line = ""
-                if lb is not None and ub is not None:
-                    confidence_line = f"\n                    deg. rate 95% confidence:          [{lb:>6.3f}, {ub:>6.3f}]"
-                losses = self.loss_analysis.report()
-                print(
-                    f"""
-                    ***************************************
-                    * Solar Data Tools Loss Factor Report *
-                    ***************************************
-
-                    degradation rate [%/yr]:                    {self.loss_analysis.degradation_rate:.3f}{confidence_line}
-                    total energy loss [kWh]:             {losses["total energy loss [kWh]"]:>13.1f}
-                    bulk deg. energy loss (gain) [kWh]:  {losses["degradation energy loss [kWh]"]:>13.1f}
-                    soiling energy loss [kWh]:           {losses["soiling energy loss [kWh]"]:>13.1f}
-                    capacity change energy loss [kWh]:   {losses["capacity change energy loss [kWh]"]:>13.1f}
-                    weather energy loss [kWh]:           {losses["weather energy loss [kWh]"]:>13.1f}
-                    system outage loss [kWh]:            {losses["system outage loss [kWh]"]:>13.1f}
-                    """
+                analysis.estimate_degradation_rate(verbose=verbose)
+            analysis.estimate_losses()
+            if analysis.total_energy_loss is None or not np.isfinite(
+                analysis.total_energy_loss
+            ):
+                raise _UnavailableResult(
+                    "Loss analysis did not return usable energy losses."
                 )
+            self.loss_analysis = analysis
+
+        def validate_options():
+            if self.power_units not in POWER_TO_W:
+                raise ValueError(
+                    "Loss factor analysis requires power units 'W' or 'kW'."
+                )
+            if deg_type not in {"linear", "nonlinear", "none"}:
+                raise ValueError(f"Unsupported degradation model: {deg_type!r}.")
+
+        labels = (
+            getattr(self.capacity_analysis, "labels", None)
+            if use_capacity_change_labels
+            else None
+        )
+        requires = ("matrix filling", "daily flags")
+        if use_capacity_change_labels:
+            requires += ("capacity change",)
+        if (
+            use_capacity_change_labels
+            and labels is None
+            and all(
+                self._stage_outcomes[stage]["status"] in _USABLE for stage in requires
+            )
+        ):
+            self._record_stage(
+                name, "skipped", "Requested capacity change labels are unavailable."
+            )
         else:
-            print("Please run pipeline first.")
+            self._run_stage(
+                name, fit_loss, requires=requires, validate=validate_options
+            )
+            if (
+                self.num_days is not None
+                and self.num_days <= 365
+                and self._stage_outcomes[name]["status"] != "skipped"
+            ):
+                self._stage_outcomes[name]["warning"] = _SHORT_RECORD_WARNING
+            if verbose and self.loss_analysis is not None:
+                print(_reporting.format_loss_report(self.loss_analysis.report()))
+        if verbose and self.loss_analysis is None:
+            print(_reporting.format_outcomes({name: self._stage_outcomes[name]}))
 
     def fit_statistical_clear_sky_model(
         self,
@@ -1082,6 +1120,8 @@ possible timezone misalignment  {timezone_status}
             solver=solver,
             verbose=verbose,
         )
+        if self.quantile_object is None:
+            return
         # the statistical clear sky fit (scsf) is the estimated quantile level
         self.scsf = self.quantile_object.quantiles_original[quantile_level]
         return
@@ -1091,6 +1131,8 @@ possible timezone misalignment  {timezone_status}
         if self.scsf is None:
             print("No SCSF model detected. Fitting now...")
             self.fit_statistical_clear_sky_model()
+        if self.scsf is None:
+            return
         clear = self.scsf.reshape(self.raw_data_matrix.shape, order="F")
         clear_energy = np.nansum(clear, axis=0)
         measured_energy = np.nansum(self.raw_data_matrix, axis=0)
@@ -1204,6 +1246,11 @@ possible timezone misalignment  {timezone_status}
         return None
 
     def generate_extra_matrix(self, column, new_index=None, key=None):
+        key = self._embed_extra_matrix(column, new_index=new_index, key=key)
+        if self.boolean_masks.daytime is not None:
+            self._score_extra_matrix(key)
+
+    def _embed_extra_matrix(self, column, new_index=None, key=None):
         grid = self.data_frame.index
         if new_index is not None and not pd.DatetimeIndex(new_index).astype(
             "datetime64[ns]"
@@ -1220,10 +1267,18 @@ possible timezone misalignment  {timezone_status}
         if key is None:
             key = column
         self.extra_matrices[key] = new_view
-        self.extra_quality_scores[key] = 1 - np.sum(
-            np.isnan(new_view[self.boolean_masks.daytime])
-        ) / np.sum(self.boolean_masks.daytime)
-        return
+        return key
+
+    def _score_extra_matrix(self, key):
+        mask = self.boolean_masks.daytime
+        if np.any(mask):
+            self.extra_quality_scores[key] = 1 - np.mean(
+                np.isnan(self.extra_matrices[key][mask])
+            )
+        else:
+            raise _UnavailableResult(
+                "No daylight samples for extra-column quality scoring."
+            )
 
     def get_daily_scores(self, threshold=0.2, solver=None):
         self.get_density_scores(threshold=threshold, solver=solver)
@@ -1390,7 +1445,7 @@ possible timezone misalignment  {timezone_status}
         metric = (filled - minimum) / (maximum - minimum)
 
         analysis = TimeShift()
-        if self.data_clearness_score >= 0.3:
+        if self.data_clearness_score is not None and self.data_clearness_score >= 0.3:
             use_ixs = self.daily_flags.clear
         else:
             use_ixs = self.daily_flags.no_errors
@@ -1445,7 +1500,12 @@ possible timezone misalignment  {timezone_status}
                     round_shifts_to_hour=round_shifts_to_hour,
                 )
 
-        time_shifts = bool(np.any(analysis.roll_by_index))
+        rolls = analysis.roll_by_index
+        if np.shape(rolls) != (filled.shape[1],) or not np.isfinite(rolls).all():
+            raise _UnavailableResult(
+                "Time shift fit did not return usable corrections."
+            )
+        time_shifts = bool(np.any(rolls))
         corrected = analysis.apply_corrections(filled) if time_shifts else filled
         self.time_shift_analysis = analysis
         self.filled_data_matrix = corrected
@@ -1522,18 +1582,33 @@ possible timezone misalignment  {timezone_status}
         except ImportError:
             print("Please install pv-system-profiler package")
             return
-        est = ConfigurationEstimator(
-            self,
-            gmt_offset,
-            solar_noon_method=solar_noon_method,
-            daylight_method=daylight_method,
-            data_matrix=data_matrix,
-            daytime_threshold=daytime_threshold,
-        )
-        self.parameter_estimation = est
+        if not self._ran_pipeline:
+            self.run_pipeline()
+        self.parameter_estimation = None
+        stage = "location and orientation setup"
+        requires = ["matrix filling", "clear days", "clipping"]
+        if "optimized_estimates" in (solar_noon_method, daylight_method):
+            requires.insert(0, "final daylight")
+        if (
+            all(self._stage_usable(name) for name in requires)
+            and self.day_index is None
+        ):
+            self._record_stage(stage, "skipped", "Requires a dated observation grid.")
+            return
+
+        def configure():
+            self.parameter_estimation = ConfigurationEstimator(
+                self,
+                gmt_offset,
+                solar_noon_method=solar_noon_method,
+                daylight_method=daylight_method,
+                data_matrix=data_matrix,
+                daytime_threshold=daytime_threshold,
+            )
+
+        self._run_stage(stage, configure, requires=requires, propagate=(ValueError,))
 
     def __help_param_est(self):
-        success = True
         if self.parameter_estimation is None:
             if self.gmt_offset is not None:
                 self.setup_location_and_orientation_estimation(self.gmt_offset)
@@ -1541,8 +1616,7 @@ possible timezone misalignment  {timezone_status}
                 m = "Please run setup_location_and_orientation_estimation\n"
                 m += "method and provide a GMT offset value first"
                 print(m)
-                success = False
-        return success
+        return self.parameter_estimation is not None
 
     def estimate_longitude(self, estimator="fit_l1", eot_calculation="duffie"):
         """
@@ -2172,6 +2246,9 @@ possible timezone misalignment  {timezone_status}
         return _plots._plot_circular_distribution(circ_data, num_bins, figsize, title)
 
     def apply_time_dilation(self, nvals_dil=101):
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("time dilation", "skipped", "Requires final daylight.")
+            return
         # Apply time dilation
         dil = Dilation(self, nvals_dil=nvals_dil)
         self.dilation_object = dil
@@ -2187,6 +2264,9 @@ possible timezone misalignment  {timezone_status}
         solver="CLARABEL",
         verbose=False,
     ):
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("quantiles", "skipped", "Requires final daylight.")
+            return
         pvq = PVQuantiles(
             self,
             nvals_dil=nvals_dil,
@@ -2212,62 +2292,85 @@ possible timezone misalignment  {timezone_status}
         regularization=0.1,
         solver="CLARABEL",
     ):
-        ql = quantile_level
-        if self.quantile_object is None:
-            if verbose:
-                print(f"Estimating q{ql} level first...")
-            self.estimate_quantiles(
-                quantile_levels=[ql],
-                nvals_dil=nvals_dil,
-                num_harmonics=num_harmonics,
-                regularization=regularization,
-                solver=solver,
-                verbose=verbose,
-            )
-        elif ql not in self.quantile_object.quantile_levels:
-            if verbose:
-                print(f"Estimating q{ql} level first...")
-            self.estimate_quantiles(
-                quantile_levels=[ql],
-                nvals_dil=nvals_dil,
-                num_harmonics=num_harmonics,
-                regularization=regularization,
-                solver=solver,
-                verbose=verbose,
-            )
-        q_undilated = self.quantile_object.quantiles_original[ql]
-        sig_undilated = self.quantile_object.sig_original
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("clear sky", "skipped", "Requires final daylight.")
+            return
+
+        self.clearsky_object = self.clearsky_sig = self.boolean_masks.clear_times = None
+        factors = None
         if loss_correction:
+            if self._ran_pipeline and self.power_units not in POWER_TO_W:
+                reason = "Loss correction requires power units 'W' or 'kW'."
+                self._record_stage("clear sky", "skipped", reason)
+                if verbose:
+                    print(reason)
+                return
             if self.loss_analysis is None:
-                self.run_loss_factor_analysis()
-            sg = sig_undilated.reshape(self.raw_data_matrix.shape, order="F")
-            sg = (
-                sg
-                / self.loss_analysis.energy_model[2]
-                / self.loss_analysis.energy_model[1]
+                self.run_loss_factor_analysis(verbose=verbose)
+            if self.loss_analysis is not None and self._stage_usable("loss analysis"):
+                factors = self.loss_analysis._clear_sky_factors(self.num_days)
+            if factors is None:
+                reason = "Requires usable, aligned degradation and soiling factors."
+                if self._ran_pipeline:
+                    self._record_stage("clear sky", "skipped", reason)
+                if verbose:
+                    print(reason)
+                return
+
+        def classify():
+            ql = quantile_level
+            if (
+                self.quantile_object is None
+                or ql not in self.quantile_object.quantile_levels
+            ):
+                if verbose:
+                    print(f"Estimating q{ql} level first...")
+                self.estimate_quantiles(
+                    quantile_levels=[ql],
+                    nvals_dil=nvals_dil,
+                    num_harmonics=num_harmonics,
+                    regularization=regularization,
+                    solver=solver,
+                    verbose=verbose,
+                )
+            q_undilated = self.quantile_object.quantiles_original[ql]
+            signal = self.quantile_object.sig_original
+            if factors is not None:
+                signal = (
+                    signal.reshape(self.raw_data_matrix.shape, order="F")
+                    / factors["soiling"]
+                    / factors["degradation"]
+                ).ravel(order="F")
+            csd = ClearSkyDetection(
+                signal,
+                q_undilated,
+                threshold_low=threshold_low,
+                threshold_high=threshold_high,
+                stickiness_high=stickiness_high,
+                stickiness_low=stickiness_low,
             )
-            sig_undilated = sg.ravel(order="F")
-        # Run clear sky detection
-        csd = ClearSkyDetection(
-            sig_undilated,
-            q_undilated,
-            threshold_low=threshold_low,
-            threshold_high=threshold_high,
-            stickiness_high=stickiness_high,
-            stickiness_low=stickiness_low,
-        )
-        self.clearsky_sig = csd.get_clearsky_sig()
-        daytime = self.boolean_masks.daytime.ravel(order="F")
-        self.clearsky_sig[~daytime] = 0
-        self.boolean_masks.clear_times = self.clearsky_sig.reshape(
-            self.boolean_masks.daytime.shape, order="F"
-        )
-        self.boolean_masks.clear_times = np.asarray(
-            self.boolean_masks.clear_times, dtype=bool
-        )
-        self.clearsky_object = csd
-        self.scsf = q_undilated
-        return
+            clear = csd.get_clearsky_sig()
+            daytime = self.boolean_masks.daytime
+            clear[~daytime.ravel(order="F")] = 0
+            self.clearsky_sig = clear
+            self.boolean_masks.clear_times = clear.reshape(
+                daytime.shape, order="F"
+            ).astype(bool)
+            self.clearsky_object = csd
+            self.scsf = q_undilated
+
+        if self._ran_pipeline:
+            if (
+                not self._run_stage("clear sky", classify, propagate=(ValueError,))
+                and verbose
+            ):
+                print(
+                    _reporting.format_outcomes(
+                        {"clear sky": self._stage_outcomes["clear sky"]}
+                    )
+                )
+        else:
+            classify()
 
     def plot_bundt(
         self,
@@ -2288,6 +2391,9 @@ possible timezone misalignment  {timezone_status}
         Display electrical power in kW by default, or request W or kW with
         ``units``. Custom input labels are displayed on their original scale.
         """
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("Bundt plot", "skipped", "Requires final daylight.")
+            return
         if units is None:
             units = "kW" if self.power_units in POWER_TO_W else self.power_units
         scale = unit_scale(self.power_units, units, POWER_TO_W)
