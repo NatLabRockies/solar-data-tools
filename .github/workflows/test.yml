@@ -2,59 +2,82 @@ name: Tests
 
 on:
   pull_request:
-    branches:
-      - "main"
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  # todo(nimish): extend to matrix of python versions/OS
-  AWS_REGION: "us-west-1"
-  USE_MOSEK: "false"
+  MPLBACKEND: Agg
 
 jobs:
   run-tests:
     runs-on: ubuntu-latest
-    environment: test
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        if: env.USE_MOSEK == 'true'
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Mosek License File
-        if: env.USE_MOSEK == 'true'
-        env:
-          MOSEK_LICENSE: "s3://slac.gismo.ci.artifacts/mosek.license/mosek.lic"
-        run: |
-          sudo mkdir /root/mosek
-          mkdir $HOME/mosek
-          aws s3 cp ${{env.MOSEK_LICENSE}} $HOME/mosek/mosek.lic
-          sudo cp $HOME/mosek/mosek.lic /root/mosek/mosek.lic
-
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
-          fetch-tags: true
+          fetch-depth: 0
 
       - name: Install Python
+        id: python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            .github/workflows/test.yml
+          cache-suffix: ${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.python-version }}
+
       - name: Install Python Dependencies
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          uv pip install --system --break-system-packages .
-          uv pip install --system --break-system-packages pytest pytest-cov pytest-github-report pytest-github-actions-annotate-failures
+          uv venv --python "${{ steps.python.outputs.python-path }}"
+          uv pip install . pytest pytest-cov 'coverage>=7.8' pytest-github-actions-annotate-failures
+
+      - name: Record resolved dependencies
+        run: |
+          mkdir -p test-results
+          uv pip freeze | tee test-results/dependencies.txt
 
       - name: Run Unit Tests
-        env:
-          pytest_github_report: true
-          pytest_verbosity: 2
-        run: pytest -v --cov=src --cov-report=xml --cov-report=term-missing --color=yes tests/
+        if: matrix.python-version != '3.12'
+        run: .venv/bin/python -m pytest -v --durations=15 --junitxml=test-results/junit.xml tests/
+
+      - name: Run Unit Tests with coverage
+        if: matrix.python-version == '3.12'
+        run: |
+          .venv/bin/python -m pytest -v --durations=15 --junitxml=test-results/junit.xml \
+            --cov --cov-report=term-missing --cov-report=xml:test-results/coverage.xml tests/
+          .venv/bin/python - <<'PY'
+          from xml.etree import ElementTree
+
+          coverage = ElementTree.parse("test-results/coverage.xml").getroot()
+          expected = {"solardatatools", "pvsystemprofiler", "anomalydetector", "sdt_dask"}
+          reported = {
+              package.get("name", "").split(".")[0]
+              for package in coverage.findall("./packages/package")
+          }
+          if int(coverage.get("lines-covered", "0")) == 0:
+              raise SystemExit("No package coverage was collected.")
+          if missing := expected - reported:
+              raise SystemExit(f"Coverage report is missing packages: {', '.join(sorted(missing))}")
+          PY
+
+      - name: Upload test diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-py${{ matrix.python-version }}
+          path: test-results/

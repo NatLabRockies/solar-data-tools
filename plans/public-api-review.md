@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-12, DH-07 opened for contract review
+- Last revised: 2026-11-13, DH-07 completion and CI-01 implementation recorded
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -327,8 +327,9 @@ implementation requests.
 
 #### DH-07 — Pipeline continuation loses numerical failure information [P2]
 
-- **Status, 2026-11-12:** implementation authorized after DH-09. The owner
-  approved the defaults below, focused tests, and independent public-tool review.
+- **Status, 2026-11-13:** complete in
+  `5c1808a0d1ed10c9ce90de1c4a861e79686585a5`. The final independent public-tool
+  review reported no findings, including after the approved banner revision.
 - **Locations at `4472044`:** `DataHandler.run_pipeline` and its private stages,
   lines 244–803; `report`, lines 805–929; `run_loss_factor_analysis`, lines
   954–1046; `detect_clear_sky`, lines 2201–2270; Dask per-key result collection
@@ -3553,6 +3554,9 @@ tests, installations, or experiments.
 
 #### CI-01 — First CI work package: correct coverage, reduce setup overhead, and verify built wheels [design/verification proposal]
 
+- **Status, 2026-11-13:** implementation checkpoint after DH-07. The owner
+  approved the four workflow decisions below and independent review. Hosted
+  verification follows on the PR.
 - **Evidence:** lint installs the entire SDT dependency tree through `.[dev]`,
   installs pre-commit again, and creates a temporary branch for the local
   `no-commit-to-branch` hook. It triggers on both pushes and pull requests,
@@ -3560,8 +3564,24 @@ tests, installations, or experiments.
   The test job installs uv through an unversioned shell installer without a
   persistent dependency cache. The three workflows have no explicit concurrency
   cancellation. `test-build.yml` builds distributions but does not install or
-  exercise them. These are configuration observations; Actions runtimes and
-  repository protection settings were not inspected.
+  exercise them.
+- **Observed Actions baseline, 2026-11-13:** the `cleanup` PR and push each
+  ran lint for `5c1808a`. The PR `lint` job took 62 seconds, including 40
+  seconds installing SDT. Across three prior successful `cleanup` PR test
+  runs, the existing `run-tests (3.10)` through `run-tests (3.13)` jobs took
+  74–162 seconds of job time, with 52–136 seconds in the test step. Use job
+  time for timeout decisions. The latest `build-pypi` job failed at `Install
+  Twine and Build`, as did the previous `cleanup` build. All four matrix jobs
+  on `5c1808a` failed at `Run Unit Tests`. Public metadata exposed the failing
+  steps but detailed logs required authentication. See the implementation
+  checkpoint in Section 9 for the local diagnosis. [Lint run](https://github.com/NatLabRockies/solar-data-tools/actions/runs/43505181180) ·
+  [Tests run](https://github.com/NatLabRockies/solar-data-tools/actions/runs/43505181258) ·
+  [Test Build run](https://github.com/NatLabRockies/solar-data-tools/actions/runs/43505181320)
+- **Check names and protection:** preserve `lint`, `run-tests (<version>)`,
+  and `build-pypi`. Public `main` metadata reports an enabled protection rule
+  with status-check enforcement off and no visible rulesets. The detailed
+  required-check endpoint required authentication. The public `test`
+  environment metadata reports no protection rules or branch policy.
 - **Bounded scope:**
   - Implement QA-01's actual-package coverage collection on one matrix entry.
     Preserve the Linux Python 3.10–3.13 test matrix and the existing test suite;
@@ -3653,6 +3673,24 @@ tests, installations, or experiments.
   files from the checkout.
 - **References:** [uv GitHub Actions integration](https://docs.astral.sh/uv/guides/integration/github/)
   and [GitHub concurrency controls](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
+- **Owner-approved implementation decisions, 2026-11-13:**
+  1. Diagnose the existing matrix failure before assessing CI-01's effect.
+     Repair a workflow-caused failure in CI-01. Route a reproduced package
+     or test regression to a separate fix under its owning issue. Preserve
+     the current suite and its assertions.
+  2. Collect coverage on Python 3.12. Keep all four package targets and
+     detect empty collection. Keep the base-install matrix. The Dask runner
+     tests skip without the optional extra, so the report covers only Dask
+     code exercised by that environment. Optional-extra coverage remains in
+     CI-02.
+  3. Remove the dormant AWS/MOSEK provisioning steps and the unused `test`
+     environment binding from the ordinary PR job. Keep licensed-solver and
+     release workflows outside this checkpoint.
+  4. Start with 10-minute lint and 15-minute test and wheel-build job
+     timeouts. Verify the margins on hosted cold-cache runs, including the
+     new wheel installation. Preserve job names and retain pytest JUnit
+     output, coverage, and the built distributions as applicable.
 
 #### CI-02 — Extend compatibility checks and avoid unnecessary numerical runs [follow-up proposal]
 
@@ -5121,3 +5159,44 @@ register.
   3.12.11 with the synchronous scheduler, including CSV JSON round-tripping
   and continuation after a per-key failure. Ruff and `git diff --check`
   passed. No live cluster or solver license was needed for failure injection.
+
+### 2026-11-13 — DH-07 completed and CI-01 opened
+
+- **Completion:** the owner committed DH-07 on `cleanup` in
+  `5c1808a0d1ed10c9ce90de1c4a861e79686585a5` following a clean independent
+  public-tool review. The final banner retains the author credit and
+  acknowledges DOE CMEI/IESO Agreement 34368. All 13 pipeline-outcome tests
+  passed locally and independently after that revision. The pre-banner
+  repository and separate Dask results are recorded above.
+- **Next:** CI-01 is open as the separate verification checkpoint before
+  broader native decomposition work. The workflow review records the
+  existing hosted failures and proposed implementation decisions. No workflow
+  or test edits were made for this review.
+
+### 2026-11-13 — CI-01 workflow implementation
+
+- **Diagnosis before workflow edits:** the prior pytest command on a fresh
+  Python 3.12 base install passed 107 tests with two skips, then exited 1
+  because `pytest-github-report` accessed `CollectReport.duration` while
+  summarizing the skipped Dask module. The previous `--cov=src` target also
+  collected no coverage. The detailed hosted tracebacks were unavailable,
+  including for the build tooling install failure.
+- **Implementation:** pytest writes JUnit directly. Python 3.12 reports on
+  all four source directories and rejects empty collection or an absent
+  package. Unexecuted Dask files appear as uncovered in the base report.
+  Lint installs pre-commit alone, with cached hook environments. The test
+  matrix uses versioned uv and dependency caching. The verification workflows
+  cancel superseded runs in their own PR or ref groups. The build job checks
+  and retains both distributions, then exercises the exact wheel in a fresh
+  environment outside the checkout.
+- **Local verification:** on Python 3.12, 107 tests passed with two skips.
+  JUnit recorded both skips. Coverage reported all four directories, and
+  the workflow guard rejected empty collection and an omitted package.
+  `actionlint`, the configured pre-commit hooks apart from the local branch
+  restriction, and `git diff --check` passed. Both distributions passed
+  `twine check`, and the out-of-checkout wheel smoke passed with base
+  dependencies.
+- **Hosted verification:** the Linux matrix, cold and warm action caches,
+  artifact upload, lint deduplication, and concurrency cancellation require
+  the updated PR workflows to run. Check the new build job's cold-run time
+  against its 15-minute limit at that point.
