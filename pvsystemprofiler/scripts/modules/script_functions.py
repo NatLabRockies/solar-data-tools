@@ -400,21 +400,18 @@ def run_failsafe_pipeline(dh, sys_tag, fts, tzc):
     :param dh: input data handler
     :param sys_tag: Dataframe column label identifying an input signal, i.e. ac_power_01 ar dc_current_02.
     :param fts: Boolean. Fix time shift parameter in `run_pipeline`.
-    :param tzc: Boolean. Time zone correction parameter in `run_pipeline`
+    :param tzc: Retired timezone option retained for compatibility.
     :return: Boolean. True if passes pipeline, otherwise False.
     """
     df = dh.data_frame_raw
     try:
         try:
-            dh.run_pipeline(
-                power_col=sys_tag, fix_shifts=fts, correct_tz=tzc, verbose=False
-            )
+            dh.run_pipeline(power_col=sys_tag, fix_shifts=fts, verbose=False)
         except ValueError:
             max_val = np.nanquantile(df[sys_tag], 0.95)
             dh.run_pipeline(
                 power_col=sys_tag,
                 fix_shifts=False,
-                correct_tz=tzc,
                 verbose=False,
                 max_val=max_val * 3,
             )
@@ -434,8 +431,7 @@ def get_commandline_inputs(input_kwargs):
     :param output_file: Absolute path to csv file containing report results.
     :param fix_time_shits: String, 'True' or 'False'. Specifies if time shifts are to be
     fixed when running the pipeline.
-    :param time_zone_correction: String, 'True' or 'False'. Specifies if the time zone correction is performed when
-    running the pipeline.
+    :param time_zone_correction: Retired flag retained for compatibility.
     :param check_json: String, 'True' or 'False'. Check json file for location information.
     :param convert_to_ts: String, 'True' or 'False'. Specifies if conversion to time series is performed when
     running the pipeline.

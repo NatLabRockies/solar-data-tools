@@ -296,16 +296,47 @@ class TimeShift:
 
     def plot_analysis(self, figsize=None):
         if self.metric is not None:
-            import matplotlib.pyplot as plt
+            return self._plot_detection(figsize=figsize)
 
-            fig = plt.figure(figsize=figsize)
-            plt.plot(self.metric, linewidth=1, label="metric")
-            plt.plot(self.s1, label="shift detector")
-            plt.plot(self.s1 + self.s2, ls="--", label="SD model")
-            plt.legend()
+    def _plot_detection(self, *dates, figsize, show_filter=False):
+        """Plot fitted solar noon by day number or on a supplied calendar axis."""
+        import matplotlib.pyplot as plt
+
+        fig = plt.figure(figsize=figsize)
+        if dates:
+            metric_style = {"alpha": 0.6, "label": "daily solar noon"}
+            shift_style = {"color": "green"}
+            model_style = {"color": "red", "label": "signal model"}
+        else:
+            metric_style = {"label": "metric"}
+            shift_style = {}
+            model_style = {"label": "SD model"}
+
+        plt.plot(*dates, self.metric, linewidth=1, **metric_style)
+        if show_filter:
+            use_ixs = self.use_ixs
+            plt.plot(
+                dates[0][use_ixs],
+                self.metric[use_ixs],
+                linewidth=1,
+                alpha=0.6,
+                color="orange",
+                marker=".",
+                ls="none",
+                label="filtered days",
+            )
+        plt.plot(*dates, self.s1, label="shift detector", **shift_style)
+        plt.plot(
+            *dates,
+            self.s1 + self.s2,
+            ls="--",
+            **model_style,
+        )
+        plt.legend()
+        if not dates:
             plt.xlabel("day number")
             plt.ylabel("solar noon [hours]")
-            return fig
+        return fig
 
     def plot_optimization(self, figsize=(8, 8)):
         if self.best_ix is not None:

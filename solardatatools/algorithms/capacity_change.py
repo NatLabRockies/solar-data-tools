@@ -181,6 +181,53 @@ class CapacityChange:
             best_ix = np.where(candidate_ixs)[0][0]
         return test_r, train_r, best_ix, jmp_counts, min_jumps
 
+    def _plot_detection(self, xs, *, no_errors, figsize, show_clusters):
+        """Plot the fitted capacity components in power units."""
+        metric = np.exp(self.metric)
+        s1 = np.exp(self.s1)
+        s2 = np.exp(self.s2)
+        s3 = np.exp(self.s3)
+        labels = self.labels
+        if show_clusters:
+            fig, ax = plt.subplots(
+                nrows=2,
+                figsize=figsize,
+                sharex=True,
+                gridspec_kw={"height_ratios": [4, 1]},
+            )
+            ax[0].plot(
+                xs[no_errors],
+                metric[no_errors],
+                alpha=0.3,
+                label="measured signal",
+                marker=".",
+                ls="none",
+                color="gray",
+            )
+            ax[0].plot(xs, s1, label="capacity change detector")
+            ax[0].plot(xs, s1 * s2 * s3, label="signal model")
+            ax[0].legend()
+            ax[0].set_title("Detection of system capacity changes")
+            ax[1].set_xlabel("date")
+            ax[0].set_ylabel("daily max power")
+            ax[1].plot(xs, labels, ls="none", marker=".")
+            ax[1].set_ylabel("Capacity clusters")
+        else:
+            fig, ax = plt.subplots(nrows=1, figsize=figsize)
+            ax.plot(xs, s1, label="capacity change detector")
+            ax.plot(xs, s1 * s2 * s3, label="signal model")
+            ax.plot(
+                xs[no_errors],
+                metric[no_errors],
+                alpha=0.3,
+                label="measured signal",
+            )
+            ax.legend()
+            ax.set_title("Detection of system capacity changes")
+            ax.set_ylabel("daily maximum power")
+            ax.set_xlabel("date")
+        return fig
+
     def plot_weight_optimization(self, figsize=(10, 5)):
         """
         A function for plotting plotting the three weight selection criteria

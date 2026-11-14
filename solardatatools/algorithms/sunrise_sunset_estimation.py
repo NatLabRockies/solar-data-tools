@@ -75,13 +75,10 @@ class SunriseSunset:
         self.sunrise_measurements = measured["sunrises"]
         self.sunset_measurements = measured["sunsets"]
         self.sunup_mask_measured = bool_msk
-        data_sampling = int(24 * 60 / data.shape[0])
-        num_days = data.shape[1]
-        mat = np.tile(np.arange(0, 24, data_sampling / 60), (num_days, 1)).T
-        sr_broadcast = np.tile(self.sunrise_estimates, (data.shape[0], 1))
-        ss_broadcast = np.tile(self.sunset_estimates, (data.shape[0], 1))
-        self.sunup_mask_estimated = np.logical_and(
-            mat >= sr_broadcast, mat < ss_broadcast
+        rows = data.shape[0]
+        hours = 24 * np.arange(rows)[:, None] / rows
+        self.sunup_mask_estimated = (hours >= self.sunrise_estimates) & (
+            hours < self.sunset_estimates
         )
         self.threshold = threshold
 
@@ -296,13 +293,10 @@ class SunriseSunset:
         self.sunrise_measurements = measured["sunrises"]
         self.sunset_measurements = measured["sunsets"]
         self.sunup_mask_measured = bool_msk
-        data_sampling = int(24 * 60 / data.shape[0])
-        num_days = data.shape[1]
-        mat = np.tile(np.arange(0, 24, data_sampling / 60), (num_days, 1)).T
-        sr_broadcast = np.tile(self.sunrise_estimates, (data.shape[0], 1))
-        ss_broadcast = np.tile(self.sunset_estimates, (data.shape[0], 1))
-        self.sunup_mask_estimated = np.logical_and(
-            mat >= sr_broadcast, mat < ss_broadcast
+        rows = data.shape[0]
+        hours = 24 * np.arange(rows)[:, None] / rows
+        self.sunup_mask_estimated = (hours >= self.sunrise_estimates) & (
+            hours < self.sunset_estimates
         )
         self.threshold = selected_th
         if self.true_times is not None:

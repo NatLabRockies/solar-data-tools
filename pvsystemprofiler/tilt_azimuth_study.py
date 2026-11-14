@@ -164,7 +164,11 @@ class TiltAzimuthStudy:
         delta_method = np.atleast_1d(delta_method)
         # calculate hour angle
         self.omega = calculate_omega(
-            self.day_of_year, self.data_sampling, self.lon_input, self.gmt_offset
+            self.day_of_year,
+            self.data_sampling,
+            self.lon_input,
+            self.gmt_offset,
+            samples_per_day=self.data_matrix.shape[0],
         )
         # fit daily signal of cos theta
         self.scale_factor_costheta, self.costheta_fit = find_fit_costheta(

@@ -5,22 +5,24 @@ This module contains a class for managing a data processing pipeline
 
 """
 
-from time import time
-from datetime import timedelta
+from time import perf_counter
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import cvxpy as cvx
 from sklearn.cluster import DBSCAN
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import traceback
-import sys
-from tqdm import tqdm
+import warnings
+from solardatatools import _reporting
+from solardatatools._time_grid import (
+    DAY,
+    calendar_grid,
+    resolve_cadence,
+    wall_clock_index,
+)
+from solardatatools._units import ENERGY_TO_WH, POWER_TO_W, unit_scale
 from solardatatools.time_axis_manipulation import (
     make_time_series,
     standardize_time_axis,
-    remove_index_timezone,
     get_index_timezone,
 )
 from solardatatools.matrix_embedding import make_2d
@@ -31,8 +33,9 @@ from solardatatools.data_quality import (
 )
 from solardatatools.data_filling import zero_nighttime, interp_missing
 from solardatatools.clear_day_detection import ClearDayDetection
-from solardatatools.plotting import plot_2d, plot_bundt_cake
-from solardatatools.solar_noon import avg_sunrise_sunset
+from solardatatools import plotting as _plots
+from solardatatools.plotting import plot_bundt_cake
+from solardatatools.daytime import _check_midnight_production
 from solardatatools.polar_transform import PolarTransform
 from solardatatools.algorithms import (
     CapacityChange,
@@ -44,9 +47,45 @@ from solardatatools.algorithms import (
     Dilation,
     ClearSkyDetection,
 )
+from solardatatools.algorithms.loss_factor_analysis import _SHORT_RECORD_WARNING
 from pandas.plotting import register_matplotlib_converters
 
 register_matplotlib_converters()
+
+
+def _select_daily_plot_flag(daily_flags, flag):
+    if flag == "good":
+        return daily_flags.no_errors, ", good days flagged"
+    if flag == "bad":
+        return ~daily_flags.no_errors, ", bad days flagged"
+    if flag in ["clear", "sunny"]:
+        return daily_flags.clear, ", clear days flagged"
+    if flag == "cloudy":
+        return daily_flags.cloudy, ", cloudy days flagged"
+    return None, ""
+
+
+_PIPELINE_STAGES = (
+    "solver preflight",
+    "observation preparation",
+    "provisional daylight",
+    "matrix filling",
+    "daily scores",
+    "daily flags",
+    "clear days",
+    "clipping",
+    "dataset scores",
+    "capacity change",
+    "time shift",
+    "final daylight",
+    "extra matrices",
+    "extra quality",
+)
+_USABLE = {"success", "warned fallback"}
+
+
+class _UnavailableResult(RuntimeError):
+    """A stage returned without a usable result."""
 
 
 class DataHandler:
@@ -69,9 +108,9 @@ class DataHandler:
 
         It is initialized by passing a Pandas dataframe to the `data_frame` parameter. Note that
         the DataFrame must have a DatetimeIndex or the user must set the `datetime_col` kwarg.
-        The timestamps are recommended to be in the local timezone of the data. If there is a small shift
-        in the timestamps, the pipeline will attempt to correct it. If the shift is large (8-10 hours), the pipeline
-        will likely fail to adjust the shift.
+        Supply timestamps in the site's local standard time. The pipeline
+        warns about significant production near midnight. Relative clock-shift
+        correction is available through ``run_pipeline(fix_shifts=True)``.
 
 
         :param data_frame: A pandas DataFrame containing the raw data. If provided,
@@ -128,32 +167,45 @@ class DataHandler:
                     e = "Data frame must have a DatetimeIndex or"
                     e += "the user must set the datetime_col kwarg."
                     raise ValueError(e)
+            wall_index = wall_clock_index(self.data_frame_raw.index)
             self.tz_info = get_index_timezone(self.data_frame_raw)
-            self.data_frame_raw = remove_index_timezone(self.data_frame_raw)
+            self.data_frame_raw.index = wall_index
             if no_future_dates:
                 now = datetime.now()
                 self.data_frame_raw = self.data_frame_raw[
-                    self.data_frame_raw.index <= now
+                    self.data_frame_raw.index.isna()
+                    | (self.data_frame_raw.index <= now)
                 ]
             self.data_frame = None
             if aggregate is not None:
                 new_data = how(self.data_frame_raw.resample(aggregate))
+                new_data[self.seq_index_key] = np.arange(len(new_data))
                 self.data_frame_raw = new_data
         else:
             self.data_frame_raw = None
             self.data_frame = None
             self.keys = None
-        self.raw_data_matrix = raw_data_matrix
+        self._source_matrix = (
+            None if raw_data_matrix is None else np.array(raw_data_matrix, copy=True)
+        )
+        self.raw_data_matrix = (
+            None if self._source_matrix is None else self._source_matrix.copy()
+        )
+        self.sampling_interval = None
         if self.raw_data_matrix is not None:
+            rows = self.raw_data_matrix.shape[0]
+            if rows == 0 or DAY.value % rows:
+                raise ValueError(
+                    "Raw matrix rows must represent a fixed sampling interval that divides a day."
+                )
             self.num_days = self.raw_data_matrix.shape[1]
-            if self.raw_data_matrix.shape[0] <= 1400:
-                self.data_sampling = int(24 * 60 / self.raw_data_matrix.shape[0])
-            else:
-                self.data_sampling = 24 * 60 / self.raw_data_matrix.shape[0]
+            self.sampling_interval = pd.Timedelta(DAY.value // rows, unit="ns")
+            self.data_sampling = 1440 / rows
         else:
             self.num_days = None
             self.data_sampling = None
         self.gmt_offset = gmt_offset
+        self.__fix_dst_ran = False
         self._initialize_attributes()
 
     def _initialize_attributes(self):
@@ -185,8 +237,10 @@ class DataHandler:
         self.normal_quality_scores = None
         # True if time shifts detected and corrected in data set
         self.time_shifts = None
-        # TZ correction factor (determined during pipeline run)
+        # Keep the retired correction field at zero during the API transition.
         self.tz_correction = 0
+        self.possible_timezone_misalignment = None
+        self.time_axis_diagnostics = None
         # Daily scores (floats), flags (booleans), and boolean masks
         self.daily_scores = DailyScores()  # 1D arrays of floats
         self.daily_flags = DailyFlags()  # 1D arrays of Booleans
@@ -204,6 +258,7 @@ class DataHandler:
         self.polar_transform = None
         self.loss_analysis = None
         self.clearsky_object = None
+        self.clearsky_sig = None
         self.quantile_object = None
         self.dilation_object = None
         self.sig_dilated = None
@@ -213,9 +268,85 @@ class DataHandler:
         self.__density_lower_threshold = None
         self.__density_upper_threshold = None
         self.__linearity_threshold = None
-        self.__recursion_depth = 0
-        self.__initial_time = None
-        self.__fix_dst_ran = False
+        self._stage_outcomes = {}
+        self.total_time = None
+
+    def _record_stage(self, name, status, reason=None, elapsed=0.0):
+        self._stage_outcomes[name] = {
+            "status": status,
+            "reason": reason,
+            "elapsed seconds": elapsed,
+        }
+
+    def _run_stage(
+        self,
+        name,
+        action,
+        *,
+        requires=(),
+        enabled=True,
+        fallback=None,
+        propagate=(),
+        validate=None,
+    ):
+        if not enabled:
+            self._record_stage(name, "unrequested", "Not requested.")
+            return False
+        missing = [
+            stage
+            for stage in requires
+            if self._stage_outcomes[stage]["status"] not in _USABLE
+        ]
+        if missing:
+            self._record_stage(name, "skipped", "Requires " + ", ".join(missing) + ".")
+            return False
+        started = perf_counter()
+        validating = validate is not None
+        try:
+            if validating:
+                validate()
+                validating = False
+            action()
+        except Exception as error:
+            reason = str(error) or type(error).__name__
+            self._record_stage(name, "failed", reason, perf_counter() - started)
+            self._error_msg += f"\n{name}: {reason}"
+            if validating or isinstance(error, propagate):
+                raise
+            return False
+        self._record_stage(
+            name,
+            "warned fallback" if fallback else "success",
+            fallback,
+            perf_counter() - started,
+        )
+        return True
+
+    def _start_pipeline_attempt(self, units, *, fix_shifts, extra_cols):
+        self._initialize_attributes()
+        self.data_frame = None
+        self.raw_data_matrix = None
+        self.num_days = None
+        self.data_sampling = None
+        self.sampling_interval = None
+        self.power_units = units
+        requested = {
+            "time shift": fix_shifts,
+            "extra matrices": extra_cols is not None,
+            "extra quality": extra_cols is not None,
+        }
+        for name in _PIPELINE_STAGES:
+            if requested.get(name, True):
+                self._record_stage(
+                    name, "skipped", "Pipeline stopped before this stage."
+                )
+            else:
+                self._record_stage(name, "unrequested", "Not requested.")
+        for name in ("loss analysis", "clear sky"):
+            self._record_stage(name, "unrequested", "Not requested.")
+
+    def _stage_usable(self, name):
+        return self._stage_outcomes.get(name, {}).get("status") in _USABLE
 
     def run_pipeline(
         self,
@@ -238,7 +369,7 @@ class DataHandler:
         time_shift_weight_seasonal=1e-3,
         periodic_detector=False,
         solar_noon_estimator="srss",
-        correct_tz=True,
+        correct_tz=None,
         extra_cols=None,
         sunrise_sunset_random_seed=42,
         daytime_threshold=0.005,
@@ -246,6 +377,9 @@ class DataHandler:
         solver="CLARABEL",
         solver_convex="CLARABEL",
         reset=True,
+        *,
+        sampling_interval=None,
+        snap_tolerance=None,
     ):
         """
         Runs the main Solar Data Tools pipeline.
@@ -297,98 +431,154 @@ class DataHandler:
         :param time_shift_weight_seasonal: Weight parameter for the seasonal time shift
                                            detector.
         :type time_shift_weight_seasonal: float, default=1e-3
-        :param periodic_detector: Whether to use a periodic detector for time shifts.
+        :param periodic_detector: If true, require exact 365-day recurrence of
+                                  the clock-shift component when fixing shifts.
         :type periodic_detector: bool, default=False
         :param solar_noon_estimator: Method to estimate solar noon. Options include
                                      "srss" (sunrise/sunset).
         :type solar_noon_estimator: str, default="srss"
-        :param correct_tz: Whether to correct for timezone offsets in the data.
-        :type correct_tz: bool, default=True
+        :param correct_tz: Deprecated. This option no longer applies a timezone correction.
+        :type correct_tz: bool, optional
         :param extra_cols: Additional columns to process, typically containing extra
                            data features.
         :type extra_cols: str, tuple, or list, optional
         :param daytime_threshold: Threshold for detecting daytime in the data.
         :type daytime_threshold: float, default=0.005
-        :param units: Units of the power data. Can be "W" (watts) or "kW" (kilowatts).
+        :param units: Input signal units. Use "W" (default) or "kW" for
+                      electrical power, or supply a custom signal unit label.
         :type units: str, default="W"
         :param solver: Solver to use for optimization tasks in the pipeline.
         :type solver: str, default="CLARABEL"
         :param solver_convex: Solver to use for convex optimization tasks.
         :type solver_convex: str, default="CLARABEL"
-        :param reset: Whether to reset the pipeline's internal state before running.
+        :param reset: Retained for compatibility. Both settings start a fresh result attempt.
         :type reset: bool, default=True
+        :param sampling_interval: Fixed duration for the observation grid. If
+                                  omitted, use the timestamp cadence.
+        :param snap_tolerance: Maximum allowed timestamp displacement, inclusive.
+                               Defaults to half the sampling interval.
 
         :return: None
         :rtype: NoneType
 
         :note:
+            Each call starts a new result attempt. Use
+            ``report(return_values=True, verbose=False)`` for partial metrics
+            and stage outcomes after a failed or incomplete run.
             If using the MOSEK solver, ensure that a valid license is available.
+            ``raw_data_matrix`` and ``boolean_masks.missing_values`` stay on
+            the observation clock during relative clock correction. The
+            timezone advisory is based on the observed data before filling.
         """
 
-        if verbose:
-            print(
-                """
-            *********************************************
-            * Solar Data Tools Data Onboarding Pipeline *
-            *********************************************
-
-            This pipeline runs a series of preprocessing, cleaning, and quality
-            control tasks on stand-alone PV power or irradiance time series data.
-            After the pipeline is run, the data may be plotted, filtered, or
-            further analyzed.
-
-            Authors: Bennet Meyers and Sara Miskovich, SLAC
-
-            (Tip: if you have a mosek [https://www.mosek.com/] license and have it
-            installed on your system, try setting solver='MOSEK' for a speedup)
-
-            This material is based upon work supported by the U.S. Department
-            of Energy's Office of Energy Efficiency and Renewable Energy (EERE)
-            under the Solar Energy Technologies Office Award Number 38529.\n
-            """
-            )
-        if solver == "MOSEK":
-            # Set all problems to use MOSEK
-            # and check that MOSEK is installed
-            solver_convex = "MOSEK"
-            try:
-                x = cvx.Variable()
-                prob = cvx.Problem(cvx.Minimize(cvx.sum_squares(x)))
-                prob.solve(solver="MOSEK")
-            except Exception as e:
-                print("VALID MOSEK LICENSE NOT AVAILABLE")
-                print(
-                    "please check that your license file is in [HOME]/mosek and is current\n"
+        self._start_pipeline_attempt(
+            units, fix_shifts=fix_shifts, extra_cols=extra_cols
+        )
+        started = perf_counter()
+        try:
+            if correct_tz is not None:
+                warnings.warn(
+                    "correct_tz is deprecated and no longer adjusts timestamps. Omit it.",
+                    DeprecationWarning,
+                    stacklevel=2,
                 )
-                print("error msg:", e)
-                return
-        if reset:
-            self._initialize_attributes()
-        self.daily_scores = DailyScores()
-        self.daily_flags = DailyFlags()
-        self.capacity_analysis = None
-        self.time_shift_analysis = None
-        self.extra_matrices = {}  # Matrix views of extra columns
-        self.extra_quality_scores = {}
-        self.power_units = units
-        if self.__recursion_depth == 0:
-            self.tz_correction = 0
+            if verbose:
+                print(_reporting.PIPELINE_BANNER)
+            if solver == "MOSEK":
+                solver_convex = "MOSEK"
+                if not self._run_stage("solver preflight", self._check_mosek):
+                    return
+            else:
+                self._record_stage(
+                    "solver preflight", "unrequested", "No solver preflight required."
+                )
+            self._run_stage(
+                "observation preparation",
+                lambda: self._prepare_observations(
+                    power_col,
+                    min_val=min_val,
+                    max_val=max_val,
+                    start_day_ix=start_day_ix,
+                    end_day_ix=end_day_ix,
+                    sampling_interval=sampling_interval,
+                    snap_tolerance=snap_tolerance,
+                    verbose=verbose,
+                ),
+                propagate=(ValueError, TypeError, KeyError),
+            )
+            self._run_stage(
+                "provisional daylight",
+                lambda: self._estimate_provisional_daylight(
+                    random_seed=sunrise_sunset_random_seed,
+                    solver=solver_convex,
+                ),
+                requires=("observation preparation",),
+            )
+            self._run_stage(
+                "matrix filling",
+                lambda: self._fill_observations(
+                    zero_night=zero_night, interp_day=interp_day
+                ),
+                requires=("provisional daylight",),
+            )
+            self._score_and_analyze_days(
+                density_lower_threshold=density_lower_threshold,
+                density_upper_threshold=density_upper_threshold,
+                linearity_threshold=linearity_threshold,
+                clear_day_smoothness_param=clear_day_smoothness_param,
+                clear_day_energy_param=clear_day_energy_param,
+                solver=solver,
+                solver_convex=solver_convex,
+            )
+            self._correct_clock_and_refresh_daylight(
+                fix_shifts=fix_shifts,
+                round_shifts_to_hour=round_shifts_to_hour,
+                time_shift_weight_change_detector=time_shift_weight_change_detector,
+                time_shift_weight_seasonal=time_shift_weight_seasonal,
+                solar_noon_estimator=solar_noon_estimator,
+                daytime_threshold=daytime_threshold,
+                periodic_detector=periodic_detector,
+                solver=solver,
+                solver_convex=solver_convex,
+            )
+            self._align_extra_columns(extra_cols)
+        finally:
+            self._ran_pipeline = True
+            self.total_time = perf_counter() - started
+            if verbose:
+                print(f"Pipeline elapsed time: {self.total_time:.2f} seconds")
+                if details := _reporting.format_outcomes(self._stage_outcomes):
+                    print(details)
 
-        t = np.zeros(6)
-        ######################################################################
-        # Preprocessing
-        ######################################################################
-        t[0] = time()
-        if verbose:
-            progress = tqdm(desc="task list", total=7, ncols=80)
+    @staticmethod
+    def _check_mosek():
+        try:
+            x = cvx.Variable()
+            problem = cvx.Problem(cvx.Minimize(cvx.sum_squares(x)))
+            problem.solve(solver="MOSEK")
+        except Exception as error:
+            raise _UnavailableResult(f"MOSEK preflight failed: {error}") from error
+
+    def _prepare_observations(
+        self,
+        power_col,
+        *,
+        min_val,
+        max_val,
+        start_day_ix,
+        end_day_ix,
+        sampling_interval,
+        snap_tolerance,
+        verbose,
+    ):
+        """Establish the observation grid and record its pre-fill diagnostics."""
         if self.data_frame_raw is not None:
             # If power_col not passed, assume that the first column contains the
             # data to be processed
             if power_col is None:
                 power_col = self.data_frame_raw.columns[0]
             if power_col not in self.data_frame_raw.columns:
-                print("Power column key not present in data frame.")
-                return
+                raise _UnavailableResult("Power column key not present in data frame.")
             # Check that data frame has a reasonable amount of data, you can't have a reasonable time series with less
             # than 24 actual measured values. This number could probably be bumped up to be honest.
             if np.sum(self.data_frame_raw[power_col].values >= 0) < 24:
@@ -396,18 +586,14 @@ class DataHandler:
                     "Insufficient data to run pipeline. Please check your data frame."
                 )
             # Pandas operations to make a time axis with regular intervals.
-            # If correct_tz is True, it will also align the median daily maximum
-            self.data_frame, sn_deviation = standardize_time_axis(
+            self.data_frame, _, self.time_axis_diagnostics = standardize_time_axis(
                 self.data_frame_raw,
                 timeindex=True,
-                power_col=power_col,
-                correct_tz=correct_tz,
                 verbose=verbose,
+                sampling_interval=sampling_interval,
+                snap_tolerance=snap_tolerance,
+                return_diagnostics=True,
             )
-            if correct_tz:
-                self.tz_correction = sn_deviation
-        if verbose:
-            progress.update()
         # Embed the data as a matrix, with days in columns. Also, set some
         # attributes, like the scan rate, day index, and day of year arary.
         # Almost never use start_day_ix and end_day_ix, but they're there
@@ -416,6 +602,13 @@ class DataHandler:
             self.make_data_matrix(
                 power_col, start_day_ix=start_day_ix, end_day_ix=end_day_ix
             )
+        elif self._source_matrix is not None:
+            self.raw_data_matrix = self._source_matrix.copy()
+            rows, self.num_days = self.raw_data_matrix.shape
+            self.sampling_interval = pd.Timedelta(DAY.value // rows, unit="ns")
+            self.data_sampling = 1440 / rows
+        else:
+            raise ValueError("Provide a data frame or a raw data matrix.")
 
         if max_val is not None:
             mat_copy = np.copy(self.raw_data_matrix)
@@ -429,304 +622,249 @@ class DataHandler:
             slct = mat_copy < min_val
             if np.sum(slct) > 0:
                 self.raw_data_matrix[slct] = np.nan
-        self.capacity_estimate = np.nanquantile(self.raw_data_matrix, 0.95)
-        if self.capacity_estimate <= 500 and self.power_units == "W":
-            self.power_units = "kW"
+        if not np.isnan(self.raw_data_matrix).all():
+            self.capacity_estimate = np.nanquantile(self.raw_data_matrix, 0.95)
         self.boolean_masks.missing_values = np.isnan(self.raw_data_matrix)
-        # Run once to get a rough estimate. Update at the end after cleaning
-        # is finished
-        if verbose:
-            progress.update()
-        ss = SunriseSunset()
-        try:
-            ss.run_optimizer(
-                self.raw_data_matrix,
-                random_seed=sunrise_sunset_random_seed,
-                plot=False,
-                solver=solver_convex,
+        self.possible_timezone_misalignment = _check_midnight_production(
+            self.raw_data_matrix
+        )
+        if self.possible_timezone_misalignment:
+            warnings.warn(
+                "Significant production near midnight suggests a possible timezone "
+                "misalignment. Check that timestamps are in the site's local standard "
+                "time. Daylight estimates and daily analyses may be unreliable when "
+                'production crosses midnight. Inspect plot_heatmap(matrix="raw").',
+                UserWarning,
+                stacklevel=5,
             )
-            self.boolean_masks.daytime = ss.sunup_mask_estimated
-        except Exception:
-            msg = "Sunrise/sunset detection failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-        self.daytime_analysis = ss
-        ######################################################################
-        # Cleaning
-        ######################################################################
-        t[1] = time()
-        if verbose:
-            progress.update()
+
+    def _estimate_provisional_daylight(self, *, random_seed, solver):
+        analysis = SunriseSunset()
+        analysis.run_optimizer(
+            self.raw_data_matrix, random_seed=random_seed, plot=False, solver=solver
+        )
+        self._publish_daylight(analysis)
+
+    def _publish_daylight(self, analysis):
+        mask = analysis.sunup_mask_estimated
+        bounds = (analysis.sunrise_estimates, analysis.sunset_estimates)
+        if (
+            np.shape(mask) != self.raw_data_matrix.shape
+            or np.asarray(mask).dtype != bool
+            or any(
+                np.shape(bound) != (self.num_days,) or not np.isfinite(bound).all()
+                for bound in bounds
+            )
+        ):
+            raise _UnavailableResult(
+                "Daylight fit did not return usable bounds and mask."
+            )
+        self.daytime_analysis = analysis
+        self.boolean_masks.daytime = mask
+
+    def _fill_observations(self, *, zero_night, interp_day):
         try:
             self.make_filled_data_matrix(zero_night=zero_night, interp_day=interp_day)
         except Exception:
-            msg = "Matrix filling failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-        num_raw_measurements = np.count_nonzero(
-            np.nan_to_num(self.raw_data_matrix, copy=True, nan=0.0)[
-                self.boolean_masks.daytime
-            ]
+            self.filled_data_matrix = None
+            self.daily_signals.energy = None
+            raise
+        daylight = self.boolean_masks.daytime
+        raw = np.count_nonzero(np.nan_to_num(self.raw_data_matrix[daylight], nan=0))
+        filled = np.count_nonzero(
+            np.nan_to_num(self.filled_data_matrix[daylight], nan=0)
         )
-        num_filled_measurements = np.count_nonzero(
-            np.nan_to_num(self.filled_data_matrix, copy=True, nan=0.0)[
-                self.boolean_masks.daytime
-            ]
-        )
-        if num_raw_measurements > 0:
-            ratio = num_filled_measurements / num_raw_measurements
-        else:
-            msg = "Error: data set contains no non-zero values!"
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
+        if raw == 0 or filled / raw < 0.85:
             self.daily_scores = None
             self.daily_flags = None
-            self.data_quality_score = 0.0
-            self.data_clearness_score = 0.0
-            self._ran_pipeline = True
-            return
-        if ratio < 0.85:
-            msg = "Error: data was lost during NaN filling procedure. "
-            msg += "This typically occurs when\nthe time stamps are in the "
-            msg += "wrong timezone. Please double check your data table.\n"
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                print(f"ratio of filled to raw nonzero measurements was {ratio:.2f}")
-            self.daily_scores = None
-            self.daily_flags = None
-            self.data_quality_score = None
-            self.data_clearness_score = None
-            self._ran_pipeline = True
-            return
-        ######################################################################
-        # Scoring
-        ######################################################################
-        t[2] = time()
-        if verbose:
-            progress.update()
-        t_clean = np.zeros(6)
-        t_clean[0] = time()
-        try:
-            # density scoring
+            if raw == 0:
+                raise _UnavailableResult(
+                    "no nonzero observations within the estimated daylight window."
+                )
+            raise _UnavailableResult(
+                f"Data was lost during NaN filling (filled/raw ratio {filled / raw:.2f})."
+            )
+
+    def _score_and_analyze_days(
+        self,
+        *,
+        density_lower_threshold,
+        density_upper_threshold,
+        linearity_threshold,
+        clear_day_smoothness_param,
+        clear_day_energy_param,
+        solver,
+        solver_convex,
+    ):
+        """Score and classify days before the optional clock correction."""
+
+        def score_days():
             self.get_daily_scores(threshold=0.2, solver=solver_convex)
-        except Exception:
-            msg = "Daily quality scoring failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.daily_scores = None
-        try:
+            if self.daily_scores.density is None or self.daily_scores.linearity is None:
+                raise _UnavailableResult(
+                    "Daily density or linearity scores are unavailable."
+                )
+
+        def flag_days():
             self.get_daily_flags(
                 density_lower_threshold=density_lower_threshold,
                 density_upper_threshold=density_upper_threshold,
                 linearity_threshold=linearity_threshold,
             )
-        except Exception:
-            msg = "Daily quality flagging failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.daily_flags = None
-        t_clean[1] = time()
-        try:
+            if self.daily_flags.no_errors is None:
+                raise _UnavailableResult("Daily quality flags are unavailable.")
+
+        def clear_days():
             self.detect_clear_days(
                 smoothness_threshold=clear_day_smoothness_param,
                 energy_threshold=clear_day_energy_param,
                 solver=solver_convex,
             )
-        except Exception:
-            msg = "Clear day detection failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-        t_clean[2] = time()
-        try:
+            if self.daily_flags.clear is None:
+                raise _UnavailableResult("Clear-day flags are unavailable.")
+
+        def detect_clipping():
             self.clipping_check(solver=solver_convex)
-        except Exception as e:
-            msg = "clipping check failed: " + str(e)
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.inverter_clipping = None
-        t_clean[3] = time()
-        try:
-            self.score_data_set()
-        except Exception:
-            msg = "Data set summary scoring failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.data_quality_score = None
-            self.data_clearness_score = None
-        t_clean[4] = time()
-        try:
+            if (
+                self.inverter_clipping is None
+                or self.daily_flags.inverter_clipped is None
+            ):
+                raise _UnavailableResult("Clipping results are unavailable.")
+
+        def detect_capacity_change():
             self.capacity_clustering(solver=solver)
-        except TypeError:
-            msg = "Capacity clustering failed."
-            self._error_msg += "\n" + msg
-            if verbose:
-                print(msg)
-                traceback.print_exception(*sys.exc_info())
-            self.capacity_changes = None
-        t_clean[5] = time()
-        ######################################################################
-        # Remaining data cleaning operations
-        # Fix time shifts depends on the data clearness scoring, and the other
-        # two depend on fixing the time shifts, when then occur.
-        ######################################################################
-        t[3] = time()
-        if verbose:
-            progress.update()
-        if fix_shifts:
-            try:
-                self.auto_fix_time_shifts(
-                    round_shifts_to_hour=round_shifts_to_hour,
-                    w1=time_shift_weight_change_detector,
-                    w2=time_shift_weight_seasonal,
-                    estimator=solar_noon_estimator,
-                    threshold=daytime_threshold,
-                    periodic_detector=periodic_detector,
-                    solver=solver,
-                )
-                rms = lambda x: np.sqrt(np.mean(np.square(x)))  # noqa: E731
-                if rms(self.time_shift_analysis.s2) > 0.25:
-                    if verbose:
-                        print("Invoking periodic timeshift detector.")
-                    old_analysis = self.time_shift_analysis
-                    self.auto_fix_time_shifts(
-                        round_shifts_to_hour=round_shifts_to_hour,
-                        w1=time_shift_weight_change_detector,
-                        w2=time_shift_weight_seasonal,
-                        estimator=solar_noon_estimator,
-                        threshold=daytime_threshold,
-                        periodic_detector=True,
-                        solver=solver,
-                    )
-                    if rms(old_analysis.s2) < rms(self.time_shift_analysis.s2):
-                        self.time_shift_analysis = old_analysis
-            except Exception as e:
-                msg = "Fix time shift algorithm failed."
-                self._error_msg += "\n" + msg
-                if verbose:
-                    print(msg)
-                    print("Error message:", e)
-                    print("\n")
-                    traceback.print_exception(*sys.exc_info())
-                self.time_shifts = None
+            if self.capacity_changes is None:
+                raise _UnavailableResult("Capacity change results are unavailable.")
 
-        # check for remaining TZ offset issues
-        if correct_tz:
-            average_noon = np.nanmean(
-                avg_sunrise_sunset(self.filled_data_matrix, threshold=0.01)
-            )
-            tz_offset = int(np.round(12 - average_noon))
-            if np.abs(tz_offset) > 1:
-                self.tz_correction += tz_offset
-                # Related to this bug fix:
-                # https://github.com/NatLabRockies/solar-data-tools/commit/ae0037771c09ace08bff5a4904475da606e934da
-                old_index = self.data_frame.index.copy()
-                self.data_frame.index = self.data_frame.index.shift(tz_offset, freq="h")
-                self.data_frame = self.data_frame.reindex(
-                    index=old_index, method="nearest", limit=1
-                ).fillna(0)
-                meas_per_hour = self.filled_data_matrix.shape[0] / 24
-                roll_by = int(meas_per_hour * tz_offset)
-                self.filled_data_matrix = np.nan_to_num(
-                    np.roll(self.filled_data_matrix, roll_by, axis=0), 0
-                )
-                self.raw_data_matrix = np.roll(self.raw_data_matrix, roll_by, axis=0)
-                self.boolean_masks.daytime = np.roll(
-                    self.boolean_masks.daytime, roll_by, axis=0
-                )
+        self._run_stage("daily scores", score_days, requires=("matrix filling",))
+        if not self._run_stage("daily flags", flag_days, requires=("daily scores",)):
+            self.normal_quality_scores = None
+            if self.daily_flags is not None:
+                self.daily_flags.density = self.daily_flags.linearity = (
+                    self.daily_flags.no_errors
+                ) = None
+        if not self._run_stage(
+            "clear days", clear_days, requires=("daily scores", "daily flags")
+        ):
+            self.clear_day_analysis = None
+            if self.daily_flags is not None:
+                self.daily_flags.clear = self.daily_flags.cloudy = None
+        if not self._run_stage("clipping", detect_clipping, requires=("daily flags",)):
+            self.clipping_analysis = None
+            self.inverter_clipping = self.num_clip_points = None
+            if self.daily_flags is not None:
+                self.daily_flags.inverter_clipped = None
+            if self.daily_scores is not None:
+                self.daily_scores.clipping_1 = self.daily_scores.clipping_2 = None
+        if not self._run_stage(
+            "dataset scores", self.score_data_set, requires=("daily flags",)
+        ):
+            self.data_quality_score = self.data_clearness_score = None
+        if not self._run_stage(
+            "capacity change", detect_capacity_change, requires=("daily flags",)
+        ):
+            self.capacity_changes = self.capacity_analysis = None
+            if self.daily_flags is not None:
+                self.daily_flags.capacity_cluster = None
 
-        # Update daytime detection based on cleaned up data
-        self.daytime_analysis.calculate_times(
-            self.filled_data_matrix, solver=solver_convex
-        )
-        self.boolean_masks.daytime = self.daytime_analysis.sunup_mask_estimated
-        ######################################################################
-        # Process Extra columns
-        ######################################################################
-        t[4] = time()
-        if verbose:
-            progress.update()
-        if extra_cols is not None:
-            freq = int(self.data_sampling * 60)
-            new_index = pd.date_range(
-                start=self.day_index[0].date(),
-                end=self.day_index[-1].date() + timedelta(days=1),
-                freq="{}s".format(freq),
-            )[:-1]
-            if isinstance(extra_cols, str):
-                extra_cols = np.atleast_1d(extra_cols)
-            elif isinstance(extra_cols, tuple):
-                extra_cols = [extra_cols]
-            for col in extra_cols:
-                self.generate_extra_matrix(col, new_index=new_index)
-        t[5] = time()
-        times = np.diff(t, n=1)
-        cleaning_times = np.diff(t_clean, n=1)
-        total_time = t[-1] - t[0]
-        # Cleanup
-        self.__recursion_depth = 0
-        if verbose:
-            progress.update()
-            progress.close()
-            print("\n")
-            if self.__initial_time is not None:
-                restart_msg = (
-                    "{:.2f} seconds spent automatically localizing the time zone\n"
-                )
-                restart_msg += "Info for last pipeline run below:\n"
-                restart_msg = restart_msg.format(t[0] - self.__initial_time)
-                print(restart_msg)
-            out = "total time: {:.2f} seconds\n"
-            out += "--------------------------------\n"
-            out += "Breakdown\n"
-            out += "--------------------------------\n"
-            out += "Preprocessing              {:.2f}s\n"
-            out += "Cleaning                   {:.2f}s\n"
-            out += "Filtering/Summarizing      {:.2f}s\n"
-            out += "    Data quality           {:.2f}s\n"
-            out += "    Clear day detect       {:.2f}s\n"
-            out += "    Clipping detect        {:.2f}s\n"
-            out += "    Capacity change detect {:.2f}s\n"
-            if extra_cols is not None:
-                out += "Extra Column Processing    {:.2f}s"
-            print(
-                out.format(
-                    total_time,
-                    times[0],
-                    times[1] + times[3],
-                    times[2],
-                    cleaning_times[0],
-                    cleaning_times[1],
-                    cleaning_times[2],
-                    cleaning_times[4],
-                    times[4],
-                )
+    def _correct_clock_and_refresh_daylight(
+        self,
+        *,
+        fix_shifts,
+        round_shifts_to_hour,
+        time_shift_weight_change_detector,
+        time_shift_weight_seasonal,
+        solar_noon_estimator,
+        daytime_threshold,
+        periodic_detector,
+        solver,
+        solver_convex,
+    ):
+        def fit_clock():
+            self.auto_fix_time_shifts(
+                round_shifts_to_hour=round_shifts_to_hour,
+                w1=time_shift_weight_change_detector,
+                w2=time_shift_weight_seasonal,
+                estimator=solar_noon_estimator,
+                threshold=daytime_threshold,
+                periodic_detector=periodic_detector,
+                solver=solver,
             )
-        self._ran_pipeline = True
-        self.total_time = total_time
-        return
+            if self.time_shifts is None or (
+                self.time_shifts and self.time_shift_analysis is None
+            ):
+                raise _UnavailableResult("Time shift results are unavailable.")
+
+        def refresh_daylight():
+            self.daytime_analysis.calculate_times(
+                self.filled_data_matrix, solver=solver_convex
+            )
+            self._publish_daylight(self.daytime_analysis)
+
+        fallback = None
+        if self._stage_outcomes["clear days"]["status"] == "failed":
+            fallback = "Clear-day selection failed. Used all good days."
+        filled = self.filled_data_matrix
+        if not self._run_stage(
+            "time shift",
+            fit_clock,
+            requires=("daily flags",),
+            enabled=fix_shifts,
+            fallback=fallback,
+        ):
+            self.filled_data_matrix = filled
+            self.time_shifts = self.time_shift_analysis = None
+        if not self._run_stage(
+            "final daylight", refresh_daylight, requires=("matrix filling",)
+        ):
+            self.daytime_analysis = None
+            self.boolean_masks.daytime = None
+
+    def _align_extra_columns(self, extra_cols):
+        if extra_cols is None:
+            return
+
+        def align():
+            if self.data_frame is None:
+                raise _UnavailableResult(
+                    "Extra matrices require timestamped input columns."
+                )
+            columns = (
+                [extra_cols]
+                if isinstance(extra_cols, (str, tuple))
+                else list(extra_cols)
+            )
+            for col in columns:
+                self._run_stage(
+                    f"extra matrix {col!r}", lambda: self._embed_extra_matrix(col)
+                )
+            if not self.extra_matrices and columns:
+                raise _UnavailableResult("No requested extra columns could be aligned.")
+
+        def score():
+            for key in self.extra_matrices:
+                self._score_extra_matrix(key)
+
+        if self._run_stage(
+            "extra matrices", align, requires=("observation preparation",)
+        ):
+            self._run_stage(
+                "extra quality",
+                score,
+                requires=("final daylight",),
+            )
+        else:
+            self._record_stage(
+                "extra quality", "skipped", "Requires aligned extra matrices."
+            )
 
     def report(self, verbose=True, return_values=False):
         """
         Generate a report summarizing key metrics from the pipeline analysis.
 
         The report includes metrics such as the data set length, data sampling rate,
-        quality scores, inverter clipping, and any detected capacity changes, time shift or time zone corrections.
+        quality scores, inverter clipping, capacity changes, relative clock
+        corrections, and a possible timezone misalignment advisory.
         The function can either print this report or return it as a dictionary.
 
         :param verbose:
@@ -742,8 +880,10 @@ class DataHandler:
             A dictionary containing the following keys:
 
             - "length": The length of the data set in years.
-            - "capacity": The estimated capacity in kW.
+            - "capacity": The estimated capacity in kW, or None for custom signal units.
             - "sampling": The data sampling rate in minutes.
+            - "timestamp rejection count": Unassigned input rows, including collision losers.
+            - "timestamp collision count": Grid slots with competing rows.
             - "quality score": The overall data quality score.
             - "clearness score": The clearness score of the data.
             - "inverter clipping": Whether inverter clipping was detected.
@@ -751,7 +891,13 @@ class DataHandler:
             - "capacity change": Whether capacity changes were detected.
             - "data quality warning": Warnings regarding data quality.
             - "time shift correction": Whether any time shifts that were corrected.
-            - "time zone correction": The amount of time zone correction applied.
+            - "time zone correction": Always zero during the compatibility transition.
+            - "possible timezone misalignment": True when the midnight check flags
+              production, False when it finds no evidence, or None when unassessed.
+            - "stage outcomes": Current-attempt statuses, reasons, and elapsed
+              seconds. Skipped and unrequested stages have zero elapsed time.
+
+            Metrics that are unavailable for the current attempt are ``None``.
 
             The dictionary is returned only if `return_values` is True.
         :rtype: dict, optional
@@ -763,87 +909,39 @@ class DataHandler:
             report = my_data_handler.report(verbose=True, return_values=True)
             print(report['capacity'])
         """
-        try:
-            report = {
-                "length": self.num_days / 365,
-                "capacity": (
-                    self.capacity_estimate
-                    if self.power_units == "kW"
-                    else self.capacity_estimate / 1000
-                ),
-                "sampling": self.data_sampling,
-                "quality score": self.data_quality_score,
-                "clearness score": self.data_clearness_score,
-                "inverter clipping": self.inverter_clipping,
-                "clipped fraction": (
-                    np.sum(self.daily_flags.inverter_clipped)
-                    / len(self.daily_flags.inverter_clipped)
-                ),
-                "capacity change": self.capacity_changes,
-                "data quality warning": self.normal_quality_scores,
-                "time shift correction": (
-                    self.time_shifts if self.time_shifts is not None else False
-                ),
-                "time zone correction": self.tz_correction,
-            }
-        except TypeError:
-            if self._ran_pipeline:
-                m1 = "Pipeline failed, please check data set.\n"
-                m2 = "Try running: self.plot_heatmap(matrix='raw')\n\n"
-                if self.num_days >= 365:
-                    l1 = "Length:                {:.2f} years\n".format(
-                        self.num_days / 365
-                    )
-                else:
-                    l1 = "Length:                {} days\n".format(self.num_days)
-                if self.power_units == "W":
-                    l1_a = "Capacity estimate:     {:.2f} kW\n".format(
-                        self.capacity_estimate / 1000
-                    )
-                elif self.power_units == "kW":
-                    l1_a = "Capacity estimate:     {:.2f} kW\n".format(
-                        self.capacity_estimate
-                    )
-                else:
-                    l1_a = "Capacity estimate:     {:.2f} ".format(
-                        self.capacity_estimate
-                    )
-                    l1_a += self.power_units + "\n"
-                if self.raw_data_matrix.shape[0] <= 1440:
-                    l2 = "Data sampling:         {} minute\n".format(self.data_sampling)
-                else:
-                    l2 = "Data sampling:         {} second\n".format(
-                        int(self.data_sampling * 60)
-                    )
-                p_out = m1 + m2 + l1 + l1_a + l2
-                print(p_out)
-                print("\nError messages captured from pipeline:" + self._error_msg)
-                return
-            else:
+        if not self._stage_outcomes:
+            if verbose:
                 print("Please run the pipeline first!")
-                return
+            return None
+        clipped = getattr(self.daily_flags, "inverter_clipped", None)
+        report = _reporting.pipeline_report(
+            num_days=self.num_days,
+            sampling=self.data_sampling,
+            capacity=self.capacity_estimate,
+            units=self.power_units,
+            diagnostics=self.time_axis_diagnostics,
+            quality=self.data_quality_score,
+            clearness=self.data_clearness_score,
+            clipping=self.inverter_clipping,
+            clipped_fraction=np.mean(clipped)
+            if clipped is not None and len(clipped)
+            else None,
+            capacity_change=self.capacity_changes,
+            quality_warning=self.normal_quality_scores,
+            time_shifts=self.time_shifts,
+            timezone_advisory=self.possible_timezone_misalignment,
+            outcomes=self._stage_outcomes,
+        )
         if verbose:
-            pout = f"""
------------------
-DATA SET REPORT
------------------
-length               {report["length"]:.2f} years
-capacity estimate    {report["capacity"]:.2f} kW
-data sampling        {report["sampling"]} minutes
-quality score        {report["quality score"]:.2f}
-clearness score      {report["clearness score"]:.2f}
-inverter clipping    {report["inverter clipping"]}
-clipped fraction     {report["clipped fraction"]:.2f}
-capacity changes     {report["capacity change"]}
-data quality warning {report["data quality warning"]}
-time shift errors    {report["time shift correction"]}
-time zone errors     {report["time zone correction"] != 0}
-            """
-            print(pout)
-        if return_values:
-            return report
-        else:
-            return
+            print(
+                _reporting.format_pipeline_report(
+                    report,
+                    capacity=self.capacity_estimate,
+                    units=self.power_units,
+                    has_observations=self.raw_data_matrix is not None,
+                )
+            )
+        return report if return_values else None
 
     def fix_dst(self):
         """
@@ -907,13 +1005,21 @@ time zone errors     {report["time zone correction"] != 0}
 
         :return: None
             Prints the results of the loss factor analysis if `verbose` is `True`.
-        :raises: RuntimeError if the pipeline has not been run before calling this method.
+        :raises ValueError: If the input signal is declared in units other than W or kW.
         """
-        if self._ran_pipeline:
-            self.loss_analysis = LossFactorAnalysis(
+        self.loss_analysis = None
+        name = "loss analysis"
+        if not self._ran_pipeline:
+            if verbose:
+                print("Please run pipeline first.")
+            return
+
+        def fit_loss():
+            analysis = LossFactorAnalysis(
                 self.daily_signals.energy,
-                capacity_change_labels=self.capacity_analysis.labels,
+                capacity_change_labels=labels,
                 outage_flags=~self.daily_flags.no_errors,
+                energy_units=self.energy_units,
                 tau=tau,
                 num_harmonics=num_harmonics,
                 deg_type=deg_type,
@@ -926,50 +1032,56 @@ time zone errors     {report["time zone correction"] != 0}
                 use_capacity_change_labels=use_capacity_change_labels,
             )
             if deg_rate is None:
-                self.loss_analysis.estimate_degradation_rate(verbose=verbose)
-            elif verbose:
-                print("Loading user-provided degradation rate.")
-            if verbose:
-                print("Performing loss factor analysis...")
-            self.loss_analysis.estimate_losses()
-            if verbose:
-                lb = self.loss_analysis.degradation_rate_lb
-                ub = self.loss_analysis.degradation_rate_ub
-                if lb is not None and ub is not None:
-                    print(
-                        f"""
-                    ***************************************
-                    * Solar Data Tools Loss Factor Report *
-                    ***************************************
+                analysis.estimate_degradation_rate(verbose=verbose)
+            analysis.estimate_losses()
+            if analysis.total_energy_loss is None or not np.isfinite(
+                analysis.total_energy_loss
+            ):
+                raise _UnavailableResult(
+                    "Loss analysis did not return usable energy losses."
+                )
+            self.loss_analysis = analysis
 
-                    degradation rate [%/yr]:                    {self.loss_analysis.degradation_rate:>6.3f}
-                    deg. rate 95% confidence:          [{lb:>6.3f}, {ub:>6.3f}]
-                    total energy loss [kWh]:             {self.loss_analysis.total_energy_loss:>13.1f}
-                    bulk deg. energy loss (gain) [kWh]:  {self.loss_analysis.degradation_energy_loss:>13.1f}
-                    soiling energy loss [kWh]:           {self.loss_analysis.soiling_energy_loss:>13.1f}
-                    capacity change energy loss [kWh]:   {self.loss_analysis.capacity_change_loss:>13.1f}
-                    weather energy loss [kWh]:           {self.loss_analysis.weather_energy_loss:>13.1f}
-                    system outage loss [kWh]:            {self.loss_analysis.outage_energy_loss:>13.1f}
-                    """
-                    )
-                else:
-                    print(
-                        f"""
-                    ***************************************
-                    * Solar Data Tools Loss Factor Report *
-                    ***************************************
+        def validate_options():
+            if self.power_units not in POWER_TO_W:
+                raise ValueError(
+                    "Loss factor analysis requires power units 'W' or 'kW'."
+                )
+            if deg_type not in {"linear", "nonlinear", "none"}:
+                raise ValueError(f"Unsupported degradation model: {deg_type!r}.")
 
-                    degradation rate [%/yr]:                    {self.loss_analysis.degradation_rate:.3f}
-                    total energy loss [kWh]:             {self.loss_analysis.total_energy_loss:>13.1f}
-                    bulk deg. energy loss (gain) [kWh]:  {self.loss_analysis.degradation_energy_loss:>13.1f}
-                    soiling energy loss [kWh]:           {self.loss_analysis.soiling_energy_loss:>13.1f}
-                    capacity change energy loss [kWh]:   {self.loss_analysis.capacity_change_loss:>13.1f}
-                    weather energy loss [kWh]:           {self.loss_analysis.weather_energy_loss:>13.1f}
-                    system outage loss [kWh]:            {self.loss_analysis.outage_energy_loss:>13.1f}
-                    """
-                    )
+        labels = (
+            getattr(self.capacity_analysis, "labels", None)
+            if use_capacity_change_labels
+            else None
+        )
+        requires = ("matrix filling", "daily flags")
+        if use_capacity_change_labels:
+            requires += ("capacity change",)
+        if (
+            use_capacity_change_labels
+            and labels is None
+            and all(
+                self._stage_outcomes[stage]["status"] in _USABLE for stage in requires
+            )
+        ):
+            self._record_stage(
+                name, "skipped", "Requested capacity change labels are unavailable."
+            )
         else:
-            print("Please run pipeline first.")
+            self._run_stage(
+                name, fit_loss, requires=requires, validate=validate_options
+            )
+            if (
+                self.num_days is not None
+                and self.num_days <= 365
+                and self._stage_outcomes[name]["status"] != "skipped"
+            ):
+                self._stage_outcomes[name]["warning"] = _SHORT_RECORD_WARNING
+            if verbose and self.loss_analysis is not None:
+                print(_reporting.format_loss_report(self.loss_analysis.report()))
+        if verbose and self.loss_analysis is None:
+            print(_reporting.format_outcomes({name: self._stage_outcomes[name]}))
 
     def fit_statistical_clear_sky_model(
         self,
@@ -1008,6 +1120,8 @@ time zone errors     {report["time zone correction"] != 0}
             solver=solver,
             verbose=verbose,
         )
+        if self.quantile_object is None:
+            return
         # the statistical clear sky fit (scsf) is the estimated quantile level
         self.scsf = self.quantile_object.quantiles_original[quantile_level]
         return
@@ -1017,13 +1131,17 @@ time zone errors     {report["time zone correction"] != 0}
         if self.scsf is None:
             print("No SCSF model detected. Fitting now...")
             self.fit_statistical_clear_sky_model()
+        if self.scsf is None:
+            return
         clear = self.scsf.reshape(self.raw_data_matrix.shape, order="F")
         clear_energy = np.nansum(clear, axis=0)
         measured_energy = np.nansum(self.raw_data_matrix, axis=0)
         pi = np.divide(measured_energy, clear_energy)
         return pi
 
-    def augment_data_frame(self, boolean_index, column_name):
+    def augment_data_frame(
+        self, boolean_index, column_name, *, input_clock="corrected"
+    ):
         """
         Add a column to the data frame (tabular) representation of the data,
         containing True/False values at each time stamp.
@@ -1034,8 +1152,16 @@ time zone errors     {report["time zone correction"] != 0}
 
         :param boolean_index: Length N or size M X N numpy arrays of booleans
         :param column_name: Name for column
+        :param input_clock: Clock frame of a sub-daily mask. The default
+                            ``"corrected"`` inverts the applied relative clock
+                            correction before export. Use ``"observation"``
+                            for masks already aligned to the observations,
+                            such as ``boolean_masks.missing_values``. Daily
+                            masks are indexed by date in either case.
         :return:
         """
+        if input_clock not in ("corrected", "observation"):
+            raise ValueError('input_clock must be "corrected" or "observation"')
         if self.data_frame is None:
             print("This DataHandler object does not contain a data frame.")
             return
@@ -1045,73 +1171,52 @@ time zone errors     {report["time zone correction"] != 0}
         if isinstance(self.data_frame.columns, pd.MultiIndex):
             num_levels = len(self.data_frame.columns.levels)
             column_name = tuple([column_name] * num_levels)
-        # If this column has been created previously, overwrite it
-        if column_name in self.data_frame_raw.columns:
-            del self.data_frame_raw[column_name]
-        if column_name in self.data_frame.columns:
-            del self.data_frame[column_name]
-        # Check if we have a daily bix or a sub-daily bix
-        m, n = self.raw_data_matrix.shape
-        index_shape = boolean_index.shape
-        # sub-daily
-        cond1 = index_shape == (m, n)
-        # daily
-        cond2 = index_shape == (n,)
-        if not cond1 and not cond2:
+        if column_name == self.seq_index_key:
+            raise ValueError("The source-row identifier is reserved.")
+        rows, days = self.raw_data_matrix.shape
+        mask = np.asarray(boolean_index, dtype=bool)
+        if mask.shape == (rows, days):
+            if input_clock == "corrected" and self.time_shifts:
+                mask = self.time_shift_analysis.invert_corrections(mask)
+            flags = mask.ravel(order="F")
+        elif mask.shape == (days,):
+            flags = np.repeat(mask, rows)
+        else:
             print("Boolean index shape does not match the data.")
-        elif cond1:
-            if self.time_shifts:
-                ts = self.time_shift_analysis
-                boolean_index = ts.invert_corrections(boolean_index)
-            start = self.day_index[0]
-            freq = "{}min".format(self.data_sampling)
-            periods = self.filled_data_matrix.size
-            tindex = pd.date_range(start=start, freq=freq, periods=periods)
-            series = pd.Series(data=boolean_index.ravel(order="F"), index=tindex)
-            series.name = column_name
-            if column_name in self.data_frame.columns:
-                del self.data_frame[column_name]
-            self.data_frame = self.data_frame.join(series)
-            self.data_frame[column_name] = self.data_frame[column_name].fillna(False)
-        elif cond2:
-            slct_dates = self.day_index[boolean_index].date
-            bix = np.isin(self.data_frame.index.date, slct_dates)
-            self.data_frame[column_name] = False
-            self.data_frame.loc[bix, column_name] = True
-
-        temp = (self.data_frame[[column_name, self.seq_index_key]]).copy()
-        temp = temp.dropna()
-        old_index = self.data_frame_raw.index
-        old_col = self.data_frame_raw[self.seq_index_key]
-        self.data_frame_raw = self.data_frame_raw.set_index(self.seq_index_key)
-        temp = temp.set_index(self.seq_index_key)
-        self.data_frame_raw = pd.merge(
-            self.data_frame_raw, temp, left_index=True, right_index=True, how="left"
-        )
-        self.data_frame_raw = self.data_frame_raw[
-            ~self.data_frame_raw.index.duplicated()
+            return
+        self.data_frame[column_name] = flags
+        accepted = self.data_frame[self.seq_index_key].notna()
+        source_flags = self.data_frame.loc[accepted].set_index(self.seq_index_key)[
+            column_name
         ]
-        self.data_frame_raw.index = old_index
-        self.data_frame_raw[self.seq_index_key] = old_col
+        self.data_frame_raw[column_name] = self.data_frame_raw[self.seq_index_key].map(
+            source_flags
+        )
 
     def make_data_matrix(self, use_col=None, start_day_ix=None, end_day_ix=None):
         df = self.data_frame
         if use_col is None:
             use_col = df.columns[0]
-        self.raw_data_matrix, day_index = make_2d(df, key=use_col, return_day_axis=True)
-        self.raw_data_matrix = self.raw_data_matrix[:, start_day_ix:end_day_ix]
-        self.num_days = self.raw_data_matrix.shape[1]
-        if self.raw_data_matrix.shape[0] <= 1400:
-            self.data_sampling = int(24 * 60 / self.raw_data_matrix.shape[0])
-        else:
-            self.data_sampling = 24 * 60 / self.raw_data_matrix.shape[0]
+        interval = resolve_cadence(df.index)
+        matrix, dates = make_2d(
+            df, key=use_col, return_day_axis=True, sampling_interval=interval
+        )
+        selection = slice(start_day_ix, end_day_ix)
+        day_index = dates[selection]
+        if day_index.empty:
+            raise ValueError(
+                "No observation days remain after selecting the power column and date range."
+            )
+        self.raw_data_matrix = matrix[:, selection]
+        self.day_index = day_index
+        self.num_days = len(day_index)
+        self.sampling_interval = interval
+        self.data_sampling = interval.value / pd.Timedelta(minutes=1).value
         self.use_column = use_col
-        self.day_index = day_index[start_day_ix:end_day_ix]
-        d1 = self.day_index[0].strftime("%x")
-        d2 = self.day_index[-1].strftime("%x")
-        self.data_frame = self.data_frame[d1:d2]
-        self.start_doy = self.day_index.dayofyear[0]
-        return
+        self.data_frame = df.reindex(
+            calendar_grid(day_index[0], day_index[-1], interval)
+        )
+        self.start_doy = day_index.dayofyear[0]
 
     def make_filled_data_matrix(self, zero_night=True, interp_day=True):
         self.filled_data_matrix = np.copy(self.raw_data_matrix)
@@ -1131,26 +1236,49 @@ time zone errors     {report["time zone correction"] != 0}
         )
         return
 
+    @property
+    def energy_units(self):
+        """Units of the daily integral on the input scale."""
+        if self.power_units in POWER_TO_W:
+            return f"{self.power_units}h"
+        if self.power_units is not None:
+            return f"({self.power_units}) h"
+        return None
+
     def generate_extra_matrix(self, column, new_index=None, key=None):
-        if new_index is None:
-            freq = self.data_sampling * 60
-            end = self.day_index[-1].date() + timedelta(days=1)
-            new_index = pd.date_range(
-                start=self.day_index[0].date(), end=end, freq="{}s".format(freq)
-            )[:-1]
-        num_meas = self.filled_data_matrix.shape[0]
-        new_view = self.data_frame[column].loc[new_index[0] : new_index[-1]]
-        new_view = new_view.values.reshape(num_meas, -1, order="F")
+        key = self._embed_extra_matrix(column, new_index=new_index, key=key)
+        if self.boolean_masks.daytime is not None:
+            self._score_extra_matrix(key)
+
+    def _embed_extra_matrix(self, column, new_index=None, key=None):
+        grid = self.data_frame.index
+        if new_index is not None and not pd.DatetimeIndex(new_index).astype(
+            "datetime64[ns]"
+        ).equals(grid.astype("datetime64[ns]")):
+            raise ValueError("new_index must match the selected observation grid.")
+        new_view = (
+            self.data_frame[column]
+            .to_numpy()
+            .reshape(self.raw_data_matrix.shape, order="F")
+        )
         if self.time_shifts:
             ts = self.time_shift_analysis
             new_view = ts.apply_corrections(new_view)
         if key is None:
             key = column
         self.extra_matrices[key] = new_view
-        self.extra_quality_scores[key] = 1 - np.sum(
-            np.isnan(new_view[self.boolean_masks.daytime])
-        ) / np.sum(self.boolean_masks.daytime)
-        return
+        return key
+
+    def _score_extra_matrix(self, key):
+        mask = self.boolean_masks.daytime
+        if np.any(mask):
+            self.extra_quality_scores[key] = 1 - np.mean(
+                np.isnan(self.extra_matrices[key][mask])
+            )
+        else:
+            raise _UnavailableResult(
+                "No daylight samples for extra-column quality scoring."
+            )
 
     def get_daily_scores(self, threshold=0.2, solver=None):
         self.get_density_scores(threshold=threshold, solver=solver)
@@ -1284,54 +1412,16 @@ time zone errors     {report["time zone correction"] != 0}
         else:
             self.capacity_changes = False
         if plot:
-            metric = np.exp(self.capacity_analysis.metric)
-            s1 = np.exp(self.capacity_analysis.s1)
-            s2 = np.exp(self.capacity_analysis.s2)
-            s3 = np.exp(self.capacity_analysis.s3)
-            labels = self.capacity_analysis.labels
             try:
                 xs = self.day_index.to_pydatetime()
             except AttributeError:
                 xs = np.arange(self.num_days)
-            if show_clusters:
-                fig, ax = plt.subplots(
-                    nrows=2,
-                    figsize=figsize,
-                    sharex=True,
-                    gridspec_kw={"height_ratios": [4, 1]},
-                )
-                ax[0].plot(
-                    xs[self.daily_flags.no_errors],
-                    metric[self.daily_flags.no_errors],
-                    alpha=0.3,
-                    label="measured signal",
-                    marker=".",
-                    ls="none",
-                    color="gray",
-                )
-                ax[0].plot(xs, s1, label="capacity change detector")
-                ax[0].plot(xs, s1 * s2 * s3, label="signal model")
-                ax[0].legend()
-                ax[0].set_title("Detection of system capacity changes")
-                ax[1].set_xlabel("date")
-                ax[0].set_ylabel("daily max power")
-                ax[1].plot(xs, labels, ls="none", marker=".")
-                ax[1].set_ylabel("Capacity clusters")
-            else:
-                fig, ax = plt.subplots(nrows=1, figsize=figsize)
-                ax.plot(xs, s1, label="capacity change detector")
-                ax.plot(xs, s1 * s2 * s3, label="signal model")
-                ax.plot(
-                    xs[self.daily_flags.no_errors],
-                    metric[self.daily_flags.no_errors],
-                    alpha=0.3,
-                    label="measured signal",
-                )
-                ax.legend()
-                ax.set_title("Detection of system capacity changes")
-                ax.set_ylabel("daily maximum power")
-                ax.set_xlabel("date")
-            return fig
+            return self.capacity_analysis._plot_detection(
+                xs,
+                no_errors=self.daily_flags.no_errors,
+                figsize=figsize,
+                show_clusters=show_clusters,
+            )
 
     def auto_fix_time_shifts(
         self,
@@ -1343,19 +1433,19 @@ time zone errors     {report["time zone correction"] != 0}
         periodic_detector=False,
         solver=None,
     ):
-        def max_min_scale(signal):
-            maximum = np.nanquantile(signal, 0.95)
-            minimum = np.nanquantile(signal, 0.05)
-            return (signal - minimum) / (maximum - minimum), minimum, maximum
+        """Fit and apply a relative clock correction to the filled matrix.
 
-        def rescale_signal(signal, minimum, maximum):
-            return (signal * (maximum - minimum)) + minimum
+        Re-fitting uses the same input clock. Use ``run_pipeline`` to also
+        refresh the daylight bounds and align extra columns.
+        """
+        filled = self.filled_data_matrix
+        if self.time_shifts:
+            filled = self.time_shift_analysis.invert_corrections(filled)
+        minimum, maximum = np.nanquantile(filled, [0.05, 0.95])
+        metric = (filled - minimum) / (maximum - minimum)
 
-        # scale data by min/max
-        metric, min_metric, max_metric = max_min_scale(self.filled_data_matrix)
-
-        self.time_shift_analysis = TimeShift()
-        if self.data_clearness_score >= 0.3:
+        analysis = TimeShift()
+        if self.data_clearness_score is not None and self.data_clearness_score >= 0.3:
             use_ixs = self.daily_flags.clear
         else:
             use_ixs = self.daily_flags.no_errors
@@ -1366,7 +1456,7 @@ time zone errors     {report["time zone correction"] != 0}
         # If running with QSS with a set w1: solve nonconvex problem
         if w1 is None or solver != "QSS":
             # Run with convex formulation first
-            self.time_shift_analysis.run(
+            analysis.run(
                 metric,
                 use_ixs=use_ixs,
                 w1=w1,
@@ -1382,7 +1472,7 @@ time zone errors     {report["time zone correction"] != 0}
         if solver == "QSS":
             if w1 is not None:
                 # Run with nonconvex formulation and set w1
-                self.time_shift_analysis.run(
+                analysis.run(
                     metric,
                     use_ixs=use_ixs,
                     w1=w1,
@@ -1397,10 +1487,10 @@ time zone errors     {report["time zone correction"] != 0}
             else:
                 # If solver is QSS, run with nonconvex formulation again
                 # using best_w1 from convex solution
-                self.time_shift_analysis.run(
+                analysis.run(
                     metric,
                     use_ixs=use_ixs,
-                    w1=self.time_shift_analysis.best_w1,
+                    w1=analysis.best_w1,
                     w2=w2,
                     solar_noon_estimator=estimator,
                     threshold=threshold,
@@ -1410,14 +1500,23 @@ time zone errors     {report["time zone correction"] != 0}
                     round_shifts_to_hour=round_shifts_to_hour,
                 )
 
-        # Scale data back
-        self.filled_data_matrix = rescale_signal(
-            self.time_shift_analysis.corrected_data, min_metric, max_metric
-        )
-        if len(self.time_shift_analysis.index_set) == 0:
-            self.time_shifts = False
-        else:
-            self.time_shifts = True
+        rolls = analysis.roll_by_index
+        if np.shape(rolls) != (filled.shape[1],) or not np.isfinite(rolls).all():
+            raise _UnavailableResult(
+                "Time shift fit did not return usable corrections."
+            )
+        time_shifts = bool(np.any(rolls))
+        corrected = analysis.apply_corrections(filled) if time_shifts else filled
+        self.time_shift_analysis = analysis
+        self.filled_data_matrix = corrected
+        self.time_shifts = time_shifts
+
+    @property
+    def corrected_observed_matrix(self):
+        """Observed samples and NaNs on the clock used for pipeline analysis."""
+        if self.time_shifts:
+            return self.time_shift_analysis.apply_corrections(self.raw_data_matrix)
+        return self.raw_data_matrix
 
     def detect_clear_days(
         self, smoothness_threshold=0.9, energy_threshold=0.8, solver=None
@@ -1483,18 +1582,33 @@ time zone errors     {report["time zone correction"] != 0}
         except ImportError:
             print("Please install pv-system-profiler package")
             return
-        est = ConfigurationEstimator(
-            self,
-            gmt_offset,
-            solar_noon_method=solar_noon_method,
-            daylight_method=daylight_method,
-            data_matrix=data_matrix,
-            daytime_threshold=daytime_threshold,
-        )
-        self.parameter_estimation = est
+        if not self._ran_pipeline:
+            self.run_pipeline()
+        self.parameter_estimation = None
+        stage = "location and orientation setup"
+        requires = ["matrix filling", "clear days", "clipping"]
+        if "optimized_estimates" in (solar_noon_method, daylight_method):
+            requires.insert(0, "final daylight")
+        if (
+            all(self._stage_usable(name) for name in requires)
+            and self.day_index is None
+        ):
+            self._record_stage(stage, "skipped", "Requires a dated observation grid.")
+            return
+
+        def configure():
+            self.parameter_estimation = ConfigurationEstimator(
+                self,
+                gmt_offset,
+                solar_noon_method=solar_noon_method,
+                daylight_method=daylight_method,
+                data_matrix=data_matrix,
+                daytime_threshold=daytime_threshold,
+            )
+
+        self._run_stage(stage, configure, requires=requires, propagate=(ValueError,))
 
     def __help_param_est(self):
-        success = True
         if self.parameter_estimation is None:
             if self.gmt_offset is not None:
                 self.setup_location_and_orientation_estimation(self.gmt_offset)
@@ -1502,8 +1616,7 @@ time zone errors     {report["time zone correction"] != 0}
                 m = "Please run setup_location_and_orientation_estimation\n"
                 m += "method and provide a GMT offset value first"
                 print(m)
-                success = False
-        return success
+        return self.parameter_estimation is not None
 
     def estimate_longitude(self, estimator="fit_l1", eot_calculation="duffie"):
         """
@@ -1677,77 +1790,30 @@ time zone errors     {report["time zone correction"] != 0}
             return
         if units is None:
             if scale_to_kw and self.power_units == "W":
-                mat /= 1000
+                mat = mat / 1000
                 units = "kW"
             else:
                 units = self.power_units
         if flag is None:
-            return plot_2d(
-                mat,
-                figsize=figsize,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
+            flagged_days, title = None, None
         elif flag == "good":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.no_errors,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, good days flagged")
-            return fig
+            flagged_days, title = self.daily_flags.no_errors, "good days flagged"
         elif flag == "bad":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=~self.daily_flags.no_errors,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, bad days flagged")
-            return fig
+            flagged_days, title = ~self.daily_flags.no_errors, "bad days flagged"
         elif flag in ["clear", "sunny"]:
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.clear,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, clear days flagged")
-            return fig
+            flagged_days, title = self.daily_flags.clear, "clear days flagged"
         elif flag == "cloudy":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.cloudy,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, cloudy days flagged")
-            return fig
+            flagged_days, title = self.daily_flags.cloudy, "cloudy days flagged"
         elif flag == "clipping":
-            fig = plot_2d(
-                mat,
-                figsize=figsize,
-                clear_days=self.daily_flags.inverter_clipped,
-                dates=self.day_index,
-                year_lines=year_lines,
-                units=units,
-            )
-            plt.title("Measured power, days with inverter clipping flagged")
-            return fig
+            flagged_days = self.daily_flags.inverter_clipped
+            title = "days with inverter clipping flagged"
         else:
             print("Unknown daily flag. Please use one of the following:")
             print("good, bad, sunny, cloudy, clipping")
             return
+        return _plots._plot_flagged_heatmap(
+            mat, flagged_days, title, self.day_index, units, year_lines, figsize
+        )
 
     def plot_daily_signals(
         self,
@@ -1832,27 +1898,19 @@ time zone errors     {report["time zone correction"] != 0}
             plot_data = self.raw_data_matrix[:, slct]
         if ravel:
             plot_data = plot_data.ravel(order="F")
-        fig = plt.figure(figsize=figsize)
-        kwargs = {}
-        if color is not None:
-            kwargs["color"] = color
-        if alpha is not None:
-            kwargs["alpha"] = alpha
-        if marker is not None:
-            kwargs["marker"] = marker
         if self.day_index is not None:
-            start = self.day_index[start_day]
-            freq = "{}min".format(self.data_sampling)
-            periods = len(plot_data)
-            xs = pd.date_range(start=start, freq=freq, periods=periods)
+            rows = self.raw_data_matrix.shape[0]
+            offsets = pd.to_timedelta(
+                np.arange(rows) * self.sampling_interval.value, unit="ns"
+            )
+            if ravel:
+                xs = self.day_index[slct].repeat(rows) + np.tile(offsets, len(slct))
+            else:
+                day = self.day_index[slct[0] if len(slct) else start_day]
+                xs = day + offsets
         else:
             xs = np.arange(len(plot_data))
-        if label is None:
-            label = "measured power"
-        plt.plot(xs, plot_data, linewidth=1, **kwargs, label=label)
         if boolean_mask is not None:
-            if mask_label is None:
-                mask_label = "boolean mask"
             m, n = self.raw_data_matrix.shape
             index_shape = boolean_mask.shape
             cond1 = index_shape == (m, n)
@@ -1862,23 +1920,25 @@ time zone errors     {report["time zone correction"] != 0}
             elif cond2:
                 temp_bool = np.tile(boolean_mask, (m, 1))
                 plot_flags = temp_bool[:, slct].ravel(order="F")
-            plt.plot(
-                xs[plot_flags],
-                plot_data[plot_flags],
-                ls="none",
-                marker=".",
-                color="red",
-                label=mask_label,
-            )
+        else:
+            plot_flags = None
+        plot_model = None
         if show_clear_model and self.scsf is not None:
             plot_model = self.scsf.reshape(self.raw_data_matrix.shape, order="F")
             plot_model = plot_model[:, slct].ravel(order="F")
-            plt.plot(
-                xs, plot_model, color="orange", linewidth=1, label="clear sky model"
-            )
-        if show_legend:
-            plt.legend()
-        return fig
+        return _plots._plot_daily_signals(
+            xs,
+            plot_data,
+            flags=plot_flags,
+            model=plot_model,
+            figsize=figsize,
+            color=color,
+            alpha=alpha,
+            label=label,
+            mask_label=mask_label,
+            show_legend=show_legend,
+            marker=marker,
+        )
 
     def plot_density_signal(self, flag=None, show_fit=False, figsize=(8, 6)):
         """
@@ -1908,91 +1968,37 @@ time zone errors     {report["time zone correction"] != 0}
         """
         if self.daily_signals.density is None:
             return
-        fig = plt.figure(figsize=figsize)
         try:
             xs = self.day_index.to_pydatetime()
         except AttributeError:
             xs = np.arange(len(self.daily_signals.density))
-        plt.plot(xs, self.daily_signals.density, linewidth=1)
-        title = "Daily signal density"
+        flagged, suffix = flag, ", days flagged"
         if isinstance(flag, str):
             if flag == "density":
-                plt.plot(
-                    xs[~self.daily_flags.density],
-                    self.daily_signals.density[~self.daily_flags.density],
-                    ls="none",
-                    marker=".",
-                    color="red",
+                flagged, suffix = (
+                    ~self.daily_flags.density,
+                    ", density outlier days flagged",
                 )
-                title += ", density outlier days flagged"
-            if flag == "good":
-                plt.plot(
-                    xs[self.daily_flags.no_errors],
-                    self.daily_signals.density[self.daily_flags.no_errors],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", good days flagged"
-            elif flag == "bad":
-                plt.plot(
-                    xs[~self.daily_flags.no_errors],
-                    self.daily_signals.density[~self.daily_flags.no_errors],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", bad days flagged"
-            elif flag in ["clear", "sunny"]:
-                plt.plot(
-                    xs[self.daily_flags.clear],
-                    self.daily_signals.density[self.daily_flags.clear],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", clear days flagged"
-            elif flag == "cloudy":
-                plt.plot(
-                    xs[self.daily_flags.cloudy],
-                    self.daily_signals.density[self.daily_flags.cloudy],
-                    ls="none",
-                    marker=".",
-                    color="red",
-                )
-                title += ", cloudy days flagged"
-        else:
-            plt.plot(
-                xs[flag],
-                self.daily_signals.density[flag],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", days flagged"
-        if np.logical_and(
-            show_fit, self.daily_signals.seasonal_density_fit is not None
-        ):
-            plt.plot(xs, self.daily_signals.seasonal_density_fit, color="orange")
-            plt.plot(
-                xs,
-                0.6 * self.daily_signals.seasonal_density_fit,
-                color="green",
-                linewidth=1,
-                ls="--",
-            )
-            plt.plot(
-                xs,
-                1.05 * self.daily_signals.seasonal_density_fit,
-                color="green",
-                linewidth=1,
-                ls="--",
-            )
-        plt.title(title)
-        plt.gcf().autofmt_xdate()
-        plt.ylabel("Fraction non-zero values")
-        plt.xlabel("Date")
-        return fig
+            else:
+                flagged, suffix = _select_daily_plot_flag(self.daily_flags, flag)
+        return _plots._plot_density_signal(
+            xs,
+            self.daily_signals.density,
+            flagged=flagged,
+            suffix=suffix,
+            seasonal_fit=self.daily_signals.seasonal_density_fit if show_fit else None,
+            lower_threshold=(
+                0.6
+                if self.__density_lower_threshold is None
+                else self.__density_lower_threshold
+            ),
+            upper_threshold=(
+                1.05
+                if self.__density_upper_threshold is None
+                else self.__density_upper_threshold
+            ),
+            figsize=figsize,
+        )
 
     def plot_data_quality_scatter(self, figsize=(6, 5)):
         """
@@ -2008,30 +2014,17 @@ time zone errors     {report["time zone correction"] != 0}
         :return: The figure containing the scatter plot of data quality scores.
         :rtype: matplotlib.figure.Figure
         """
-        fig = plt.figure(figsize=figsize)
-        labels = self.daily_scores.quality_clustering
-        for lb in set(labels):
-            plt.scatter(
-                self.daily_scores.density[labels == lb],
-                self.daily_scores.linearity[labels == lb],
-                marker=".",
-                label=lb,
-            )
-        plt.xlabel("density score")
-        plt.ylabel("linearity score")
-        plt.axhline(
+        return _plots._plot_data_quality_scatter(
+            self.daily_scores.density,
+            self.daily_scores.linearity,
+            self.daily_scores.quality_clustering,
             self.__linearity_threshold,
-            linewidth=1,
-            color="red",
-            ls=":",
-            label="decision boundary",
+            self.__density_upper_threshold,
+            self.__density_lower_threshold,
+            figsize,
         )
-        plt.axvline(self.__density_upper_threshold, linewidth=1, color="red", ls=":")
-        plt.axvline(self.__density_lower_threshold, linewidth=1, color="red", ls=":")
-        plt.legend()
-        return fig
 
-    def plot_daily_energy(self, flag=None, figsize=(8, 6), units="Wh"):
+    def plot_daily_energy(self, flag=None, figsize=(8, 6), units=None):
         """
         Plot the daily energy production.
 
@@ -2044,7 +2037,8 @@ time zone errors     {report["time zone correction"] != 0}
         :param figsize: The size of the figure to create. Default is (8, 6).
         :type figsize: tuple, optional
 
-        :param units: The units to use for the energy data. Default is "Wh".
+        :param units: Display units. Defaults to the stored integral units.
+                      Electrical energy can be displayed in Wh or kWh.
         :type units: str, optional
 
         :return: The figure showing the daily energy analysis.
@@ -2052,58 +2046,26 @@ time zone errors     {report["time zone correction"] != 0}
         """
         if self.filled_data_matrix is None:
             return
-        fig = plt.figure(figsize=figsize)
-        energy = np.copy(self.daily_signals.energy)
-        if np.max(energy) > 1000:
-            energy /= 1000
-            units = "kWh"
+        source_units = self.energy_units
+        if units is None:
+            units = source_units
+        energy = self.daily_signals.energy * unit_scale(
+            source_units, units, ENERGY_TO_WH
+        )
         try:
             xs = self.day_index.to_pydatetime()
         except AttributeError:
             xs = np.arange(len(self.daily_signals.density))
-        plt.plot(xs, energy, linewidth=1)
-        title = "Daily energy production"
-        if flag == "good":
-            plt.plot(
-                xs[self.daily_flags.no_errors],
-                energy[self.daily_flags.no_errors],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", good days flagged"
-        elif flag == "bad":
-            plt.plot(
-                xs[~self.daily_flags.no_errors],
-                energy[~self.daily_flags.no_errors],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", bad days flagged"
-        elif flag in ["clear", "sunny"]:
-            plt.plot(
-                xs[self.daily_flags.clear],
-                energy[self.daily_flags.clear],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", clear days flagged"
-        elif flag == "cloudy":
-            plt.plot(
-                xs[self.daily_flags.cloudy],
-                energy[self.daily_flags.cloudy],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            title += ", cloudy days flagged"
-        plt.title(title)
-        plt.gcf().autofmt_xdate()
-        plt.xlabel("Date")
-        plt.ylabel("Energy ({})".format(units))
-        return fig
+        flagged, suffix = _select_daily_plot_flag(self.daily_flags, flag)
+        return _plots._plot_daily_energy(
+            xs,
+            energy,
+            electrical=source_units in ENERGY_TO_WH,
+            units=units,
+            flagged=flagged,
+            suffix=suffix,
+            figsize=figsize,
+        )
 
     def plot_clipping(self, figsize=(10, 8)):
         """
@@ -2122,40 +2084,18 @@ time zone errors     {report["time zone correction"] != 0}
             return
         if self.daily_scores.clipping_1 is None:
             return
-        fig, ax = plt.subplots(nrows=2, figsize=figsize, sharex=True)
-        clip_stat_1 = self.daily_scores.clipping_1
-        clip_stat_2 = self.daily_scores.clipping_2
-        clipped_days = self.daily_flags.inverter_clipped
         try:
             xs = self.day_index.to_pydatetime()
         except AttributeError:
             xs = np.arange(len(self.daily_signals.density))
-        ax[0].plot(xs, clip_stat_1)
-        ax[1].plot(xs, clip_stat_2)
-        if self.inverter_clipping:
-            ax[0].plot(
-                xs[clipped_days],
-                clip_stat_1[clipped_days],
-                ls="none",
-                marker=".",
-                color="red",
-                label="days with inverter clipping",
-            )
-            ax[1].plot(
-                xs[clipped_days],
-                clip_stat_2[clipped_days],
-                ls="none",
-                marker=".",
-                color="red",
-            )
-            ax[0].legend()
-        ax[0].set_title("Clipping Score 1: ratio of daily max to overal max")
-        ax[1].set_title(
-            "Clipping Score 2: fraction of daily energy generated at daily max power"
+        return ClippingDetection._plot_scores(
+            xs,
+            self.daily_scores.clipping_1,
+            self.daily_scores.clipping_2,
+            self.daily_flags.inverter_clipped,
+            self.inverter_clipping,
+            figsize,
         )
-        ax[1].set_xlabel("Date")
-        plt.gcf().autofmt_xdate()
-        return fig
 
     def plot_daily_max_pdf(self, figsize=(8, 6)):
         """
@@ -2257,43 +2197,11 @@ time zone errors     {report["time zone correction"] != 0}
         :rtype: matplotlib.figure.Figure
         """
         if self.time_shift_analysis is not None:
-            use_ixs = self.time_shift_analysis.use_ixs
-            plt.figure(figsize=figsize)
-            plt.plot(
+            return self.time_shift_analysis._plot_detection(
                 self.day_index,
-                self.time_shift_analysis.metric,
-                linewidth=1,
-                alpha=0.6,
-                label="daily solar noon",
+                figsize=figsize,
+                show_filter=show_filter,
             )
-            if show_filter:
-                plt.plot(
-                    self.day_index[use_ixs],
-                    self.time_shift_analysis.metric[use_ixs],
-                    linewidth=1,
-                    alpha=0.6,
-                    color="orange",
-                    marker=".",
-                    ls="none",
-                    label="filtered days",
-                )
-            plt.plot(
-                self.day_index,
-                self.time_shift_analysis.s1,
-                color="green",
-                label="shift detector",
-            )
-            plt.plot(
-                self.day_index,
-                self.time_shift_analysis.s1 + self.time_shift_analysis.s2,
-                color="red",
-                label="signal model",
-                ls="--",
-            )
-            # plt.ylim(11, 13)
-            plt.legend()
-            fig = plt.gcf()
-            return fig
         else:
             print(
                 "Please run the time shift analysis first by setting 'fix_shifts=True' when "
@@ -2335,44 +2243,12 @@ time zone errors     {report["time zone correction"] != 0}
         circ_data = (
             (self.start_doy + np.arange(self.num_days)[slct]) % 365 * 2 * np.pi / 365
         )
-        circ_hist = np.histogram(circ_data, bins=num_bins)
-        fig = plt.figure(figsize=figsize)
-        ax = fig.add_axes([0.1, 0.1, 0.8, 0.8], polar=True)
-        start = (circ_hist[1][0] + circ_hist[1][1]) / 2
-        end = (circ_hist[1][-1] + circ_hist[1][-2]) / 2
-        theta = np.linspace(start, end, num_bins)
-        radii = circ_hist[0]
-        width = 2 * np.pi / num_bins
-        bars = ax.bar(theta, radii, width=width, bottom=0.0, edgecolor="none")
-        for r, bar in zip(radii, bars):
-            bar.set_facecolor(cm.magma(r / np.max(circ_hist[0])))
-            bar.set_alpha(0.75)
-        ax.set_theta_zero_location("N")
-        ax.set_theta_direction(-1)
-        ax.set_rorigin(-2.0)
-        ax.set_rlabel_position(0)
-        ax.set_xticks(np.linspace(0, 2 * np.pi, 12, endpoint=False))
-        ax.set_xticklabels(
-            [
-                "Jan",
-                "Feb",
-                "Mar",
-                "Apr",
-                "May",
-                "Jun",
-                "Jul",
-                "Aug",
-                "Sep",
-                "Oct",
-                "Nov",
-                "Dec",
-            ]
-        )
-        ax.set_title(title)
-        # print(np.sum(circ_hist[0] <= 1))
-        return fig
+        return _plots._plot_circular_distribution(circ_data, num_bins, figsize, title)
 
     def apply_time_dilation(self, nvals_dil=101):
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("time dilation", "skipped", "Requires final daylight.")
+            return
         # Apply time dilation
         dil = Dilation(self, nvals_dil=nvals_dil)
         self.dilation_object = dil
@@ -2388,6 +2264,9 @@ time zone errors     {report["time zone correction"] != 0}
         solver="CLARABEL",
         verbose=False,
     ):
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("quantiles", "skipped", "Requires final daylight.")
+            return
         pvq = PVQuantiles(
             self,
             nvals_dil=nvals_dil,
@@ -2413,67 +2292,90 @@ time zone errors     {report["time zone correction"] != 0}
         regularization=0.1,
         solver="CLARABEL",
     ):
-        ql = quantile_level
-        if self.quantile_object is None:
-            if verbose:
-                print(f"Estimating q{ql} level first...")
-            self.estimate_quantiles(
-                quantile_levels=[ql],
-                nvals_dil=nvals_dil,
-                num_harmonics=num_harmonics,
-                regularization=regularization,
-                solver=solver,
-                verbose=verbose,
-            )
-        elif ql not in self.quantile_object.quantile_levels:
-            if verbose:
-                print(f"Estimating q{ql} level first...")
-            self.estimate_quantiles(
-                quantile_levels=[ql],
-                nvals_dil=nvals_dil,
-                num_harmonics=num_harmonics,
-                regularization=regularization,
-                solver=solver,
-                verbose=verbose,
-            )
-        q_undilated = self.quantile_object.quantiles_original[ql]
-        sig_undilated = self.quantile_object.sig_original
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("clear sky", "skipped", "Requires final daylight.")
+            return
+
+        self.clearsky_object = self.clearsky_sig = self.boolean_masks.clear_times = None
+        factors = None
         if loss_correction:
+            if self._ran_pipeline and self.power_units not in POWER_TO_W:
+                reason = "Loss correction requires power units 'W' or 'kW'."
+                self._record_stage("clear sky", "skipped", reason)
+                if verbose:
+                    print(reason)
+                return
             if self.loss_analysis is None:
-                self.run_loss_factor_analysis()
-            sg = sig_undilated.reshape(self.raw_data_matrix.shape, order="F")
-            sg = (
-                sg
-                / self.loss_analysis.energy_model[2]
-                / self.loss_analysis.energy_model[1]
+                self.run_loss_factor_analysis(verbose=verbose)
+            if self.loss_analysis is not None and self._stage_usable("loss analysis"):
+                factors = self.loss_analysis._clear_sky_factors(self.num_days)
+            if factors is None:
+                reason = "Requires usable, aligned degradation and soiling factors."
+                if self._ran_pipeline:
+                    self._record_stage("clear sky", "skipped", reason)
+                if verbose:
+                    print(reason)
+                return
+
+        def classify():
+            ql = quantile_level
+            if (
+                self.quantile_object is None
+                or ql not in self.quantile_object.quantile_levels
+            ):
+                if verbose:
+                    print(f"Estimating q{ql} level first...")
+                self.estimate_quantiles(
+                    quantile_levels=[ql],
+                    nvals_dil=nvals_dil,
+                    num_harmonics=num_harmonics,
+                    regularization=regularization,
+                    solver=solver,
+                    verbose=verbose,
+                )
+            q_undilated = self.quantile_object.quantiles_original[ql]
+            signal = self.quantile_object.sig_original
+            if factors is not None:
+                signal = (
+                    signal.reshape(self.raw_data_matrix.shape, order="F")
+                    / factors["soiling"]
+                    / factors["degradation"]
+                ).ravel(order="F")
+            csd = ClearSkyDetection(
+                signal,
+                q_undilated,
+                threshold_low=threshold_low,
+                threshold_high=threshold_high,
+                stickiness_high=stickiness_high,
+                stickiness_low=stickiness_low,
             )
-            sig_undilated = sg.ravel(order="F")
-        # Run clear sky detection
-        csd = ClearSkyDetection(
-            sig_undilated,
-            q_undilated,
-            threshold_low=threshold_low,
-            threshold_high=threshold_high,
-            stickiness_high=stickiness_high,
-            stickiness_low=stickiness_low,
-        )
-        self.clearsky_sig = csd.get_clearsky_sig()
-        daytime = self.boolean_masks.daytime.ravel(order="F")
-        self.clearsky_sig[~daytime] = 0
-        self.boolean_masks.clear_times = self.clearsky_sig.reshape(
-            self.boolean_masks.daytime.shape, order="F"
-        )
-        self.boolean_masks.clear_times = np.asarray(
-            self.boolean_masks.clear_times, dtype=bool
-        )
-        self.clearsky_object = csd
-        self.scsf = q_undilated
-        return
+            clear = csd.get_clearsky_sig()
+            daytime = self.boolean_masks.daytime
+            clear[~daytime.ravel(order="F")] = 0
+            self.clearsky_sig = clear
+            self.boolean_masks.clear_times = clear.reshape(
+                daytime.shape, order="F"
+            ).astype(bool)
+            self.clearsky_object = csd
+            self.scsf = q_undilated
+
+        if self._ran_pipeline:
+            if (
+                not self._run_stage("clear sky", classify, propagate=(ValueError,))
+                and verbose
+            ):
+                print(
+                    _reporting.format_outcomes(
+                        {"clear sky": self._stage_outcomes["clear sky"]}
+                    )
+                )
+        else:
+            classify()
 
     def plot_bundt(
         self,
         figsize=(12, 8),
-        units="kW",
+        units=None,
         inner_radius=1.0,
         slice_thickness=100,
         elev=45,
@@ -2484,6 +2386,18 @@ time zone errors     {report["time zone correction"] != 0}
         aggregate=True,
         skip=0,
     ):
+        """Plot daily power on the dilated grid.
+
+        Display electrical power in kW by default, or request W or kW with
+        ``units``. Custom input labels are displayed on their original scale.
+        """
+        if self._ran_pipeline and not self._stage_usable("final daylight"):
+            self._record_stage("Bundt plot", "skipped", "Requires final daylight.")
+            return
+        if units is None:
+            units = "kW" if self.power_units in POWER_TO_W else self.power_units
+        scale = unit_scale(self.power_units, units, POWER_TO_W)
+
         # Ensure sunrise/sunset analysis has been run
         if (
             not hasattr(self, "daytime_analysis")
@@ -2499,41 +2413,11 @@ time zone errors     {report["time zone correction"] != 0}
         )
         # shape: (101, ndays)
 
-        if aggregate:
-            # Drop Feb 29 entries
-            leap_day_mask = np.logical_and(
-                self.day_index.month == 2, self.day_index.day == 29
-            )
-            valid_days_mask = ~leap_day_mask
-            valid_day_index = self.day_index[valid_days_mask]
-            valid_matrix = dilated_matrix[:, valid_days_mask]  # shape: (101, N')
-
-            # Create 365-day vector for day-of-year (1–365, excluding Feb 29)
-            doy = np.copy(valid_day_index.dayofyear.to_numpy())
-            doy[doy > 59] -= 1  # adjust for removed Feb 29
-
-            # Aggregate using nanmedian for robustness to missing data
-            data_for_bundt = np.zeros((365, dilation.nvals_dil))
-            data_for_bundt[:] = np.nan  # initialize with NaNs
-
-            for day in range(1, 366):
-                same_day_mask = doy == day
-                if np.any(same_day_mask):
-                    # shape: (101, n_years_for_day)
-                    day_data = valid_matrix[:, same_day_mask]
-                    data_for_bundt[day - 1] = np.nanmedian(day_data, axis=1)
-        else:
-            start_day = skip
-            end_day = skip + 365
-            data = dilated_matrix[:, start_day:end_day]
-            if data.shape[1] < 365:
-                # Pad with zeros if not enough days
-                pad = 365 - data.shape[1]
-                data = np.pad(data, ((0, 0), (0, pad)), constant_values=0)
-            data_for_bundt = data.T  # shape: (365, 101)
-
+        data_for_bundt = _plots._prepare_bundt_data(
+            dilated_matrix, self.day_index, aggregate=aggregate, skip=skip
+        )
         fig = plot_bundt_cake(
-            data_for_bundt,
+            data_for_bundt * scale,
             figsize=figsize,
             units=units,
             inner_radius=inner_radius,

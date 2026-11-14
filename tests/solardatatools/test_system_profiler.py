@@ -14,9 +14,7 @@ class TestSystemProfiler(unittest.TestCase):
         data = pd.read_csv(data_file_path, parse_dates=[1], index_col=1)
         dh = DataHandler(data)
         dh.fix_dst()
-        dh.run_pipeline(
-            power_col="ac_power", fix_shifts=False, correct_tz=False, verbose=False
-        )
+        dh.run_pipeline(power_col="ac_power", fix_shifts=False, verbose=False)
         # dh.report()
         dh.setup_location_and_orientation_estimation(-5)
 
