@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-16, SD-07 sparse-compilation memory proposal added
+- Last revised: 2026-11-16, QUALITY-02 proposal added and latest completion status recorded
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -44,6 +44,22 @@ first CI work package. P1/P2 labels below preserve provisional materiality
 assessments without establishing an implementation order or superseding owner
 decisions. Design and performance proposals are identified separately from
 demonstrated defects.
+
+### Latest completion status (2026-11-16)
+
+The most recent source checkpoint is committed in `574b6ab`: the native
+`l2_l1d2_constrained` filter, named result and diagnostics, reusable clipping
+workspace, caller migration, and associated tests/documentation. This completes
+the first bounded SD-01 checkpoint and CLIP-01's stale-fit correction, not the
+whole native-decomposition migration. The final corrected checkpoint's
+recorded verification is 121 base tests passed with two skips; independent
+review passed 52 focused tests with one skip, eight additional numerical cases,
+and the exact rebuilt wheel's isolated smoke check. Those checks were not rerun
+for this plan update. CLIP-02's
+false-positive investigation and SD-07's memory measurements remain open.
+The subsequent commit `8d2dc04` records the reviewed SD-07 proposal only; it
+implements no memory mitigation. QUALITY-02 below is newly planned work.
+Section 9 retains the preceding completed pipeline, grid, and CI checkpoints.
 
 ### Decision-pass status and remaining specifications (2026-11-11)
 
@@ -751,6 +767,14 @@ the baseline for DH-08's preparation stage.
 
 #### TIME-02 — Sampling intervals are rounded or truncated inconsistently [P2]
 
+- **Public issue follow-up, 2026-11-16:** the integer-minute sunrise/sunset
+  conversion and ten-second cadence rounding reported in
+  [issue #235](https://github.com/NatLabRockies/solar-data-tools/issues/235)
+  are addressed by the completed TIME-01/TIME-02 work on
+  [PR #237](https://github.com/NatLabRockies/solar-data-tools/pull/237).
+  These are branch changes, not a claim about a released package. Exact grid
+  handling does not establish the validity of every quality screen at that
+  cadence; QUALITY-02 tracks the remaining linearity-screening concern.
 - **Locations:** `standardize_time_axis`, approximately lines 195–203;
   `data_handler.py`, `make_data_matrix`, lines 1104–1107;
   `matrix_embedding.py`, exported `make_2d`, lines 39–46;
@@ -837,6 +861,55 @@ the other physical-time conversions; no duplicate correction is intended here.
   paths against their documented semantics, including out-of-range ratios and
   unavailable days. Clipping a continuous mean to $[0,1]$ does not make it a
   fraction of passing days.
+
+#### QUALITY-02 — Linearity screening depends on cadence and power units [P2]
+
+- **Locations:** `data_quality.py`, `make_linearity_scores` and
+  `make_quality_flags`; `DataHandler.get_linearity_scores` and downstream
+  `no_errors` day selection.
+- **Public report:** [issue #235](https://github.com/NatLabRockies/solar-data-tools/issues/235)
+  reports rejection of all days by the linearity screen for one-second data
+  after bypassing the former cadence-rounding error. The two coordinate bugs
+  in that report are covered by completed TIME-02 work. Address the remaining
+  screening behavior and its validation within PR #237; keep the issue open
+  until the remaining work has been verified.
+- **Source-confirmed finding:** `make_linearity_scores` rounds adjacent raw
+  power differences to four decimal places before finding their mode. Capacity
+  sets the low-power exclusion, but does not normalize these differences, and
+  the sampling interval is not used. Thus the rounding tolerance has different
+  physical meaning for W and kW. For a smooth power signal,
+  $p(t+\Delta)-p(t)\approx p'(t)\Delta$; reducing $\Delta$ makes increments
+  smaller relative to the fixed rounding bins and can increase the modal
+  fraction without indicating interpolation. Sensor quantization can also
+  produce repeated increments. This is a plausible explanation for the report,
+  not a reproduced diagnosis of the reporter's data.
+- **Proposed correction and specification checkpoint:** define the physical
+  quantity and tolerance used to detect suspicious linear interpolation,
+  accounting for cadence, power scaling, and measurement quantization. Require
+  equivalent physical inputs in W and kW to yield equivalent scores and flags,
+  including the reported infill mask. Decide the normalization and acceptance
+  rule from the validation below before adopting a replacement. Dividing by
+  cadence alone does not establish discrimination between interpolation,
+  legitimate smooth production, and quantization. Do not resolve the report by
+  merely relaxing the threshold, silently resampling, or imposing an
+  unsupported blanket one-minute minimum. Preserve the distinction between
+  measured observations, pipeline-filled samples, and inferred infill labels.
+- **Proposed verification:** compare equivalent W/kW inputs; include smooth
+  physical signals, quantized observations, and deliberately interpolated
+  intervals at one-second, ten-second, one-minute, and representative coarser
+  cadences. Use bounded synthetic cases and representative observed records,
+  including the reporter's data if available. Check scores, flags, infill-mask
+  localization, and downstream day eligibility through the public pipeline.
+  Distinguish cadence effects from changes in noise and information caused by
+  aggregation; do not require identical scores for all resampled records.
+  Establish useful detection and false-rejection behavior before documenting
+  the supported operating range. Existing grid tests establish coordinate
+  handling, not scientific validation of high-frequency quality screening.
+- **Related and sequencing:** TIME-02 establishes the exact grid; DH-03
+  establishes explicit units. QUALITY-02 follows those contracts and is
+  separate from QUALITY-01's aggregate passing-fraction correction. No
+  screening implementation or numerical experiment is authorized by this
+  plan update; implementation still requires issue-specific direction.
 
 ### `solardatatools/sensor_identification.py`
 
@@ -1160,7 +1233,10 @@ with no usable candidate is a numerical failure, not a no-change finding.
 
 ##### SD-01 first checkpoint — constrained filter and clipping
 
-- **Status, 2026-11-13:** the owner selected `l2_l1d2_constrained`, its
+- **Completion status, 2026-11-16:** committed in `574b6ab`; the bounded
+  filter/clipping checkpoint is complete. The implementation and verification
+  record below applies to this checkpoint, not the other SD-01 models.
+- **Scope decision, 2026-11-13:** the owner selected `l2_l1d2_constrained`, its
   clipping caller, and the analytic wheel check as the first native checkpoint.
   The owner approved retaining the public name and import path with the
   breaking result migration, and allowing zero weights when the fitted trend
@@ -1280,9 +1356,14 @@ with no usable candidate is a numerical failure, not a no-change finding.
   returned `optimal_inaccurate` with linking and endpoint errors of
   $1.30\times10^{-13}$ and $7.06\times10^{-13}$. The pipeline accepted the
   fit and reported the warning. The lower false positive remains a separate
-  follow-up under CLIP-02. The local base suite passed 119 tests with two
-  skips. The sdist and wheel passed Twine, and the isolated installed-wheel
-  smoke passed.
+  follow-up under CLIP-02. The earlier checkpoint passed 119 local base tests
+  with two skips, Twine checks for the sdist and wheel, and an isolated
+  installed-wheel smoke check. After correcting the known-set construction,
+  the final checkpoint passed 121 local base tests with two skips. Independent
+  review passed 52 focused tests with one skip, eight additional numerical
+  cases under CLARABEL and OSQP, and the exact rebuilt wheel's isolated smoke
+  check. MOSEK was unavailable. These are prior implementation/review results;
+  no tests were rerun for the November 16 plan-only status update.
 - **Memory follow-up:** SD-07 uses this migrated filter and its clipping caller
   as the first bounded memory-verification target. Its `sum_squares` residual
   penalty avoids gfosd's explicit unannotated quadratic-form construction;
@@ -1929,7 +2010,7 @@ with no usable candidate is a numerical failure, not a no-change finding.
 
 #### CLIP-01 — Reusing the detector reuses a stale fitted CDF [P2]
 
-- **Status, 2026-11-13:** implemented in the SD-01 constrained-filter
+- **Status, 2026-11-16:** complete in `574b6ab`, the SD-01 constrained-filter
   checkpoint. A repeat fit matches a fresh detector given the same data and
   weight. A failed repeat leaves clipping results unavailable.
 - **Location:** `pointmass_detection`, approximately lines 138–144.
@@ -5441,6 +5522,18 @@ register.
   scope before editing source. CI-02 is the next CI work package and can use
   the hosted baseline as optional-extra contracts are resolved.
 
+### 2026-11-16 — Native constrained-filter checkpoint completion recorded
+
+- **Completion:** `574b6ab` commits the first bounded SD-01 checkpoint:
+  `l2_l1d2_constrained`, its clipping caller, result/diagnostic types, solver
+  pass-through, reusable workspace, migration documentation, and tests.
+  CLIP-01's stale-fit correction is included. The checkpoint's implementation
+  and verification evidence remains recorded under SD-01 above.
+- **Remaining:** the other native models and their selection rules are not
+  complete. CLIP-02 remains a separate scientific investigation; SD-07 adds
+  memory verification without changing the accepted filter model. This status
+  update records the existing commit and does not authorize a next code change.
+
 ### 2026-11-16 — SD-07 sparse-compilation memory proposal recorded
 
 - **Owner direction:** add the memory issue to the working plan and obtain a
@@ -5464,3 +5557,26 @@ register.
   reported memory reduction or speedup. Exact benchmark settings and comparison
   tolerances remain implementation-stage specifications. No solves or memory
   benchmarks were run; this paragraph records the completed reviews only.
+
+### 2026-11-16 — Issue #235 remaining quality-screening work recorded
+
+- **Owner direction:** draft a brief response identifying PR #237, then update
+  this plan and obtain an independent review of the update.
+- **Disposition:** link the two completed coordinate fixes from TIME-02 and
+  add QUALITY-02 under `data_quality.py` for cadence- and unit-dependent
+  linearity screening. The remaining work is planned within PR #237; it is
+  not implemented by this entry.
+- **Evidence and limits:** source inspection confirms fixed-decimal rounding
+  of raw power increments. The reporter's one-second dataset has not been
+  inspected or reproduced, and no numerical tests were run for this update.
+  Exact-grid support and valid high-frequency quality screening are separate
+  claims. The screening specification and empirical validation remain open.
+- **Authorization:** edit this plan and request review only; no source edits,
+  numerical experiments, commits, or GitHub posting are part of this update.
+- **Independent plan review:** `sdt-review` found no issues with QUALITY-02 at
+  the public-tool or scientific register. Its completion-status finding was
+  resolved by distinguishing the earlier 119-test run from the final 121-test
+  run and recording the independent 52-test review, additional numerical
+  cases, rebuilt-wheel smoke check, and MOSEK limitation. The recheck returned
+  no remaining findings at either register. No tests or experiments were run
+  for these plan reviews; this is not validation of a replacement screen.
