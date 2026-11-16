@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-13, DH-07 completion and CI-01 implementation recorded
+- Last revised: 2026-11-13, SD-01 constrained filter and clipping migrated
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -921,21 +921,22 @@ feasible sets, penalty normalization, physical time scale, and extraction rule.
 The proposed common convention is
 
 $$
-y_t=x_t^{\mathrm{residual}}+\sum_{k=1}^K x_t^{(k)},\qquad t\in\Omega,
+y_t=x_t^{\mathrm{residual}}+\sum_{k=1}^K x_t^{(k)},\qquad t\in\mathcal{K},
 $$
 
-where $\Omega$ contains finite observations admitted by the caller's mask.
+where the known set $\mathcal{K}$ contains the indices of the finite
+observations admitted by the caller's mask.
 **Owner clarification, 2026-11-11:** all components, including the residual, are
-defined on the entire model index: $x^{(k)}\in\mathbf R^T$ for every component.
+defined on the entire model index: $x^{(k)}\in\mathbf{R}^T$ for every component.
 The mask restricts the consistency equality, not the domain of the component
 signals. For the predefined residual costs used here, the residual entries
-outside $\Omega$ minimize their separable cost at zero, so
-$x_t^{\mathrm{residual}}=0$ for $t\notin\Omega$. This is part of the model
+outside $\mathcal{K}$ minimize their separable cost at zero, so
+$x_t^{\mathrm{residual}}=0$ for $t\notin\mathcal{K}$. This is part of the model
 construction, not a choice to replace solved residual entries with missing
 values. Return the full-grid components and retain the known-set mask
 separately. The structural reconstruction
 $\widehat y_t=\sum_{k=1}^K x_t^{(k)}$ is defined throughout the grid; outside
-$\Omega$ it also equals the sum of all components and supplies the imputed
+$\mathcal{K}$ it also equals the sum of all components and supplies the imputed
 signal. Raw missing observations remain missing in the input record.
 Downstream code should access components by role. **Owner decision, 2026-10-21:**
 use a Fourier basis with physical annual period $P=365.2425$ days as the common
@@ -1113,12 +1114,12 @@ with no usable candidate is a numerical failure, not a no-change finding.
   migration guide; DH-07 covers stage propagation and partial reporting.
 - **Component-domain clarification, 2026-11-11:** return every component over
   the full time index, including the residual with its model-implied zeros
-  outside $\Omega$ for the predefined residual costs. Include $\Omega$ in the
+  outside $\mathcal{K}$ for the predefined residual costs. Include $\mathcal{K}$ in the
   result as the admitted-observation mask. The proposal to insert NaNs into the
-  returned residual outside $\Omega$ is withdrawn. Preserve the structural
+  returned residual outside $\mathcal{K}$ is withdrawn. Preserve the structural
   reconstruction over the full grid and distinguish it from the original data
   and its missing entries. Fit-error summaries must respect their specified
-  observation domain and normalization; a zero residual outside $\Omega$ does
+  observation domain and normalization; a zero residual outside $\mathcal{K}$ does
   not make that index an observation.
 - **Proposed correction:** use one agreed native CVXPY formulation per estimator,
   pass solver selection/options through to CVXPY, and preserve the meaning of
@@ -1143,8 +1144,8 @@ with no usable candidate is a numerical failure, not a no-change finding.
   and solvers, including qualified acceptance and retained-estimate fallbacks.
   Verify a numerical failure result with no component estimate, readable failure
   diagnostics, and no special exception-catching requirement at the public API.
-  Verify full-grid component arrays, residual zeros outside $\Omega$ to the
-  applicable numerical accuracy, consistency on $\Omega$, and reconstruction
+  Verify full-grid component arrays, residual zeros outside $\mathcal{K}$ to the
+  applicable numerical accuracy, consistency on $\mathcal{K}$, and reconstruction
   through internal gaps and excluded endpoints. Include finite held-out entries
   as well as missing input values; neither changes the full-grid component
   domain. Preserve the mask and raw-data missingness through extraction.
@@ -1156,6 +1157,132 @@ with no usable candidate is a numerical failure, not a no-change finding.
   and sunrise/sunset callers against the agreed model. Do not preserve the old
   nonperiodic numerical fixtures as requirements of the replacement.
 - **Reference:** [CVXPY solver selection and options](https://www.cvxpy.org/tutorial/solvers/index.html).
+
+##### SD-01 first checkpoint — constrained filter and clipping
+
+- **Status, 2026-11-13:** the owner selected `l2_l1d2_constrained`, its
+  clipping caller, and the analytic wheel check as the first native checkpoint.
+  The owner approved retaining the public name and import path with the
+  breaking result migration, and allowing zero weights when the fitted trend
+  is determined. Time shifts and capacity will have separate checkpoints
+  coordinated with SD-03, SD-04, SD-05, and their selection rules.
+- **Objective:** minimize $w_0\|x_0\|_2^2+w_1\|D^2x_1\|_1$ over the
+  full-grid residual $x_0$ and trend $x_1$. The consistency constraint
+  $x_{0,t}+x_{1,t}=y_t$ applies for $t\in\mathcal{K}$. The trend endpoints
+  are $x_{1,0}=0$ and $x_{1,T-1}=1$. Use defaults $w_0=1$ and $w_1=5$ for
+  every solver. The legacy
+  MOSEK path ignored both public weights and used an effective ratio of 10.
+  Use `w1=10` with `w0=1` to request that ratio explicitly. The endpoint
+  constraints impose neither monotonicity nor bounds on the interior.
+- **Entry point and inputs:** keep the import and name
+  `solardatatools.signal_decompositions.l2_l1d2_constrained` and replace its
+  signature with `(signal, *, w0=1, w1=5, use_ixs=None, solver="CLARABEL",
+  solver_options=None, verbose=False)`. Admit finite samples selected by the
+  optional same-shape Boolean mask. Require a real one-dimensional input with
+  at least three entries and finite nonnegative weights with at least one
+  positive weight. A valid grid with no admitted samples returns a no-data
+  result without a solve. With `w0=0` and `w1>0`, the anchors and curvature
+  penalty give the affine ramp. With `w1=0`, unobserved interior values are
+  undetermined. Permit zero when all interior samples are admitted and reject
+  it otherwise. Endpoint anchors apply even when observations at those indices
+  are excluded.
+- **Returned snapshot:** use `DecompositionResult` and `SolveDiagnostics` as
+  the common public types for native models. Expose `observation_mask`,
+  `has_fit`, and `components` keyed by `residual` and `trend`. Both arrays span
+  the model grid. The residual is $y-x_1$ on the known set. Elsewhere it
+  minimizes the squared residual cost at zero for $w_0>0$. When $w_0=0$,
+  the result chooses zero for the undetermined entries.
+  `trend` is the fitted curve used by clipping and for imputation. Return
+  `components=None` on failure. Diagnostics expose `solver`, `solver_options`,
+  `solver_status`, `objective_value`, `constraint_errors`, `warnings`, and
+  `failure_reason`. Status and objective are `None` when unavailable.
+  Constraint errors are keyed by constraint name. This model reports
+  `linking` and `endpoint` as maxima in the original signal units when
+  those errors can be evaluated. Report the backend status verbatim when
+  it is available.
+  Earlier snapshots stay independent of later solves. The migration guide
+  maps the old fitted tuple element to `components["trend"]` and the old
+  objective access to `diagnostics.objective_value`. Retire `return_all` and
+  backend-problem exposure for this filter.
+- **Solve and acceptance:** use CLARABEL with its default settings and forward
+  explicitly supplied CVXPY solver options. Resolve `solver=None` to CLARABEL.
+  Reject conflicting entries for `solver` or `verbose` and controls that change
+  solver selection or model class, such as `solver_path`, `gp`, and `qcp`.
+  Invalid inputs, an unavailable requested solver, and identifiable invalid
+  options raise configuration errors. Some CVXPY adapters use `SolverError`
+  for both setup errors and numerical failures. Preserve the backend error
+  message when the cause cannot be classified reliably. For `optimal` and
+  `optimal_inaccurate`, require
+  finite component values and objective, maximum linking error no larger
+  than $10^{-6}\max(1,\|y_{\mathcal{K}}\|_\infty)$, and each endpoint error no larger
+  than $10^{-6}$ in the fixed 0–1 scale. These are post-solve thresholds,
+  independent of the solver settings. Keep `optimal_inaccurate` visible and
+  attach a warning when accepted. Other solver statuses, a numerical
+  `SolverError`, or failed feasibility checks return an unavailable fit with
+  diagnostics. No automatic retry or solver substitution is proposed.
+- **SD-06 boundary and clipping:** model-specific implementation names follow
+  the decomposition convention used by the public functions. The private
+  module is `_l2_l1d2_constrained` and its workspace is
+  `_L2L1D2ConstrainedWorkspace`. The public call returns a detached snapshot.
+  The detector retains a DPP problem for a fixed grid and known set, updating
+  the known values and weights on each call. CVXPY indexes both components
+  on the known set in the consistency constraint. A change in the grid
+  length or known set rebuilds the problem. A change
+  of solver options must not inherit native solver settings from the previous
+  fit. This addresses CLIP-01 without a public workspace API. Forward solver
+  settings through direct clipping calls and `DataHandler.clipping_check`,
+  whose direct-call default changes from OSQP to CLARABEL. Keep the pipeline's
+  existing `solver_convex` route for this checkpoint. Keep current
+  clipping thresholds and point-mass rules. Clear prior fitted CDF, flags,
+  and masks if the new attempt fails. `DataHandler` records the clipping
+  failure reason or an accepted inaccurate-fit warning through DH-07.
+- **Verification:** migrate the existing filter regression and analytic ramp
+  wheel check to the named result. Test weight effects against a small
+  reference objective, masked gaps and endpoints, alternate-solver option
+  forwarding, and accepted/rejected statuses. Compare a reused detector with
+  a fresh detector on the changed CDF and weight. Verify failed repeat fits
+  clear prior clipping outputs and propagate through the pipeline report.
+  A standalone DPP CVXPY probe on the legacy 200-point fixture reproduced the
+  CLARABEL fit to a mean absolute difference of $2.5\times10^{-7}$. Default
+  OSQP returned `user_limit` despite small feasibility errors on that fixture.
+- **Verification data:** retain the existing public regression input
+  `tests/fixtures/signal_decompositions/test_l2_l1d2_default_input.json` and
+  historical fit/objective in `test_l2_l1d2_default_output.json` in the same
+  directory. The input is a 200-point normalized piecewise-linear signal with
+  five slope changes and additive Gaussian noise (standard deviation 0.05,
+  NumPy seed 12). Its generator is `test_signal_decompositions_data.ipynb`.
+  The old private MOSEK output uses the same construction with `w1=10` and
+  is historical comparison data. Keep the public reference at `w1=5`.
+  The existing `DataHandler` clipping regression uses `ac_power_01` from
+  `tests/fixtures/data_transforms/timeseries.csv` (31,298 rows, April 9 through
+  October 18, 2015) and the two scoring CSVs `clipping_1.csv` and
+  `clipping_2.csv` in `tests/fixtures/scoring/`. Keep the wheel's generated
+  21-point unit ramp. Use short explicit arrays for analytic weight and mask
+  tests, including `[0, 0.9, 1]` for weight sensitivity and
+  `[0, 0.8, NaN, 0.6, 1]` for missing and held-out samples. Use deterministic
+  generated CDFs for repeated-fit and failure cases. Preserve checked-in
+  fixture values during the result migration.
+- **Clipping baseline interpretation:** the owner identified the lower
+  detected level as spurious on the PV fixture. The current detector flags
+  19 days near the upper candidate (99.98% of the overall maximum) and four
+  near the lower candidate (96.18%). The four lower-candidate days barely
+  clear the 0.10 daily near-maximum energy threshold (scores about 0.100–0.103).
+  Use the fixture to verify that the native filter integrates with clipping.
+  Treat the lower candidate as a false-positive example for a separate review
+  of point-mass support and clipping-day selection.
+- **Implementation and verification:** the public filter now uses one native
+  CVXPY model. Clipping refits when data or weights change and keeps returned
+  results independent of the reusable workspace. Serialization preserves
+  the results and reconstructs the workspace on the next fit. On the PV
+  fixture, the before and after runs had identical clipping scores, candidate
+  locations, 23 flagged days, and 798 flagged samples. The maximum absolute
+  difference between fitted CDFs was $4.94\times10^{-5}$. Native CLARABEL
+  returned `optimal_inaccurate` with linking and endpoint errors of
+  $1.30\times10^{-13}$ and $7.06\times10^{-13}$. The pipeline accepted the
+  fit and reported the warning. The lower false positive remains a separate
+  follow-up under CLIP-02. The local base suite passed 119 tests with two
+  skips. The sdist and wheel passed Twine, and the isolated installed-wheel
+  smoke passed.
 
 ### `solardatatools/_osd_signal_decompositions.py`
 
@@ -1425,8 +1552,8 @@ with no usable candidate is a numerical failure, not a no-change finding.
   with `w3`; the subsequent squared norm therefore introduces `w3**2`.
 - **Owner decision, 2026-10-21:** retain the existing model choices and document
   them explicitly; normalization changes and broader model updates are future
-  work. For time shifts, retain $\sum_{t\in\Omega} r_t^2$. For capacity, retain
-  $T^{-1}\sum_{t\in\Omega}|r_t|$, with $T$ the full grid length, not the number
+  work. For time shifts, retain $\sum_{t\in\mathcal{K}} r_t^2$. For capacity, retain
+  $T^{-1}\sum_{t\in\mathcal{K}}|r_t|$, with $T$ the full grid length, not the number
   of admitted observations. Retain the existing structural-penalty scaling and
   effective weight meanings unless a separate change is explicitly agreed.
   These conventions are not inherently invalid; mask- or horizon-dependent
@@ -1513,21 +1640,12 @@ with no usable candidate is a numerical failure, not a no-change finding.
   violates DPP. Weights outside the absolute value also permit fixed epigraph
   constraints with changing objective coefficients. Verify reusable formulations
   with `problem.is_dcp(dpp=True)`.
-- **Data and mask updates:** use finite parameter values and fixed graph
-  dimensions while preserving the full-grid component construction in SD-01.
-  With an explicit full-grid residual variable, apply its predefined separable
-  cost over the full grid and mask only the consistency equality. The uncoupled
-  residual entries outside $\Omega$ then minimize their cost at zero. An
-  equivalent reduced formulation may eliminate the residual analytically:
-  with $m=\mathbf 1_\Omega$ and finite $y^{\mathrm{safe}}$ agreeing with the data
-  on $\Omega$, use $r=m\odot(y^{\mathrm{safe}}-\widehat y)$ as the full-grid
-  residual expression. It is zero outside $\Omega$ by construction and must be
-  returned as such. Merely zero-weighting residual costs while leaving explicit
-  off-mask residual variables free does not establish this contract. Retain the
-  agreed model-specific loss normalization (SD-05). Do not pass NaNs as parameter
-  values or treat finite placeholders as observations. Precompute products such
-  as $m\odot y^{\mathrm{safe}}$, and combinations of masks and loss coefficients
-  where needed, to avoid parameter–parameter products.
+- **Data and mask updates:** define components by their full-grid costs
+  and feasible sets. The known set $\mathcal{K}$ selects the rows of the
+  consistency equality. Use finite observed values in the data parameter.
+  A positively weighted squared residual is minimized at zero outside
+  $\mathcal{K}$. The constrained filter rebuilds its problem when the
+  known set changes. Retain the model-specific loss normalization (SD-05).
 - **Reuse limits:** DPP caches canonicalization. Solver warm starts and numerical
   factorization reuse are separate, solver-dependent benefits; a changing mask
   can change matrices and prevent factorization reuse. Rebuild for structural or
@@ -1607,13 +1725,13 @@ with no usable candidate is a numerical failure, not a no-change finding.
 - **Cheap certificate for a convex subproblem:** retain the current scaling
 
   $$
-  \frac{1}{T}\sum_{t\in\Omega}|r_t|
+  \frac{1}{T}\sum_{t\in\mathcal{K}}|r_t|
   +\frac{w_2}{T-1}\sum_{i=0}^{T-2}a_i|(Dc)_i|
   +g(\theta,\beta),\qquad a_i>0.
   $$
 
   For a constant-capacity optimum, let $p$ be a residual-loss subgradient that
-  satisfies the remaining stationarity conditions. Then $p_t=0$ off $\Omega$,
+  satisfies the remaining stationarity conditions. Then $p_t=0$ off $\mathcal{K}$,
   $|p_t|\leq 1/T$, and $\mathbf 1^T p=0$ because the capacity level is free.
   The first-difference KKT condition gives the sufficient weight
 
@@ -1626,7 +1744,7 @@ with no usable candidate is a numerical failure, not a no-change finding.
   With absolute residual loss, certificates can be nonunique, so an arbitrary
   certificate provides a sufficient threshold, not necessarily the smallest
   critical weight. A conservative bound requiring no solve follows by replacing
-  the numerator with $\min(n_i,m-n_i)/T$, where $m=|\Omega|$ and $n_i$ counts
+  the numerator with $\min(n_i,m-n_i)/T$, where $m=|\mathcal{K}|$ and $n_i$ counts
   admitted observations through index $i$. With full observation and $a_i=1$,
   this gives $(T-1)\lfloor T/2\rfloor/T$. Such a bound can be loose; failing to
   exceed it does not establish that the current grid endpoint is insufficient.
@@ -1735,6 +1853,9 @@ with no usable candidate is a numerical failure, not a no-change finding.
 
 #### CLIP-01 — Reusing the detector reuses a stale fitted CDF [P2]
 
+- **Status, 2026-11-13:** implemented in the SD-01 constrained-filter
+  checkpoint. A repeat fit matches a fresh detector given the same data and
+  weight. A failed repeat leaves clipping results unavailable.
 - **Location:** `pointmass_detection`, approximately lines 138–144.
 - **Finding:** later calls replace `self.y_param` and `self.weight` but do not
   recompute `self.y_hat`. These assignments do not update and solve an optimization
@@ -1746,6 +1867,17 @@ with no usable candidate is a numerical failure, not a no-change finding.
   SD-01 covers the public weights currently dropped by the MOSEK route.
 - **Proposed verification:** compare a reused detector on a second dataset/weight
   with a fresh detector on that same dataset/weight.
+
+#### CLIP-02 — The detector reports a weakly supported lower clipping level
+
+- **Evidence from the PV fixture:** the detector reports a lower candidate at
+  96.18% of the overall maximum. Four nearby days barely clear the daily
+  near-maximum energy threshold. The owner identified this candidate as a
+  false positive. The upper candidate at 99.98% is supported by 19 flagged
+  days. Both candidates reproduce after the native filter migration.
+- **Follow-up:** review the evidence required to report a clipping level,
+  including cases with one supported level and cases with multiple supported
+  levels. Keep the fixture as an example for that review.
 
 ### `solardatatools/algorithms/dilation.py`
 
@@ -2180,7 +2312,7 @@ with no usable candidate is a numerical failure, not a no-change finding.
   RdTools' default residual-loss configuration is not adopted.
 - **Soiling-model decision, 2026-10-22:** adopt the direct, lower-memory RdTools
   convention in loss-factor analysis, replacing the sawtooth dictionary with a
-  nonpositive log-soiling signal $s\in\mathbf R^N$. With $D$ the first-difference
+  nonpositive log-soiling signal $s\in\mathbf{R}^N$. With $D$ the first-difference
   operator and $(u)_-=\max(-u,0)$ elementwise, the base convex formulation is
 
   $$
@@ -2413,9 +2545,9 @@ with no usable candidate is a numerical failure, not a no-change finding.
   overwrite its value. If the declared interval contains no complete lag pair,
   report the comparison as unavailable while retaining a valid overall chord.
 - **Reporting-domain decision, 2026-10-22:** use the span from the first to the
-  last admitted observation. Let $\Omega_{\mathrm{base}}$ be the finite
+  last admitted observation. Let $\mathcal{K}_{\mathrm{base}}$ be the finite
   observations admitted by the fit's base mask before Monte Carlo subsampling;
-  set $a=\min\Omega_{\mathrm{base}}$ and $b=\max\Omega_{\mathrm{base}}$.
+  set $a=\min\mathcal{K}_{\mathrm{base}}$ and $b=\max\mathcal{K}_{\mathrm{base}}$.
   Require $a<b$ and finite fitted values used by the reporting transform. Both
   summaries use the reporting curve over $[a,b]$, rather than raw measurements;
   missing observations within the interval do not shorten its elapsed duration.
@@ -2897,7 +3029,7 @@ every reconstruction holdout calculation.
 - **Fit-improvement decision, 2026-10-21:** require at least a 2% reduction in
   in-sample squared residual error relative to the constant-shift fit, subject
   to validation. For candidate weight $\lambda$, use
-  $E_\lambda=\sum_{t\in\Omega}(y_t-c_t^{(\lambda)}-s_t^{(\lambda)})^2$ and
+  $E_\lambda=\sum_{t\in\mathcal{K}}(y_t-c_t^{(\lambda)}-s_t^{(\lambda)})^2$ and
   accept this screen when $E_\lambda\leq0.98E_{\mathrm{const}}$, for positive
   reference error $E_{\mathrm{const}}$. Both errors use the same admitted
   observations and seasonal model. This compares residual loss, not the full
@@ -3554,17 +3686,16 @@ tests, installations, or experiments.
 
 #### CI-01 — First CI work package: correct coverage, reduce setup overhead, and verify built wheels [design/verification proposal]
 
-- **Status, 2026-11-13:** implementation checkpoint after DH-07. The owner
-  approved the four workflow decisions below and independent review. Hosted
-  verification follows on the PR.
-- **Evidence:** lint installs the entire SDT dependency tree through `.[dev]`,
-  installs pre-commit again, and creates a temporary branch for the local
-  `no-commit-to-branch` hook. It triggers on both pushes and pull requests,
+- **Status, 2026-11-13:** reviewed and committed in
+  `29fa9f514447cc6a4f37d7d3e377c1886cfa084a`. Section 9 records the hosted PR
+  results and the remaining runtime checks.
+- **Pre-CI-01 configuration:** lint installed the entire SDT dependency tree
+  through `.[dev]`, installed pre-commit again, and created a temporary branch
+  for the local `no-commit-to-branch` hook. It triggered on pushes and pull requests,
   duplicating lint work for ordinary updates to an open same-repository PR.
-  The test job installs uv through an unversioned shell installer without a
-  persistent dependency cache. The three workflows have no explicit concurrency
-  cancellation. `test-build.yml` builds distributions but does not install or
-  exercise them.
+  The test job installed uv through an unversioned shell installer without a
+  persistent dependency cache. The three workflows had no explicit concurrency
+  cancellation. `test-build.yml` built distributions without installing them.
 - **Observed Actions baseline, 2026-11-13:** the `cleanup` PR and push each
   ran lint for `5c1808a`. The PR `lint` job took 62 seconds, including 40
   seconds installing SDT. Across three prior successful `cleanup` PR test
@@ -5196,7 +5327,36 @@ register.
   restriction, and `git diff --check` passed. Both distributions passed
   `twine check`, and the out-of-checkout wheel smoke passed with base
   dependencies.
-- **Hosted verification:** the Linux matrix, cold and warm action caches,
-  artifact upload, lint deduplication, and concurrency cancellation require
-  the updated PR workflows to run. Check the new build job's cold-run time
-  against its 15-minute limit at that point.
+### 2026-11-13 — CI-01 committed and checked on PR #237
+
+- **Completion:** the owner committed the clean public-tool checkpoint in
+  `29fa9f514447cc6a4f37d7d3e377c1886cfa084a`. All four local macOS base-install
+  runs passed 107 tests with two skips each. The independent review also
+  passed the exact final wheel's isolated smoke check.
+- **Hosted Linux baseline:** the first attempt of all three workflows passed
+  on [PR #237](https://github.com/NatLabRockies/solar-data-tools/pull/237).
+  `lint` took 34 seconds, compared with 62 seconds on the previous PR baseline.
+  This commit produced one PR lint run and no push-triggered duplicate.
+  [Lint run](https://github.com/NatLabRockies/solar-data-tools/actions/runs/43533890988)
+- **Tests and diagnostics:** Python 3.10, 3.11, 3.12, and 3.13 jobs took 115,
+  71, 133, and 96 seconds, respectively, and each uploaded its `test-results`
+  artifact. The Python 3.12 coverage step and four-package guard passed. The
+  public artifact inventory confirmed upload. Downloading the XML or reading
+  the full hosted logs requires authentication.
+  [Tests run](https://github.com/NatLabRockies/solar-data-tools/actions/runs/43533891087)
+- **Distribution check:** `build-pypi` took 83 seconds, including 39 seconds
+  for the fresh wheel install and isolated smoke. The Twine check and
+  distribution artifact upload passed. The observed job times were within
+  the 10-minute lint and 15-minute test/build limits.
+  [Test Build run](https://github.com/NatLabRockies/solar-data-tools/actions/runs/43533891073)
+- **Remaining hosted observations:** Actions lists a saved pre-commit cache
+  and four uv caches created during these jobs. Verify warm restores and
+  superseded-run cancellation on subsequent PR activity. The passing run
+  confirms normal artifact uploads. Retention after a failing test still
+  awaits a hosted failure with diagnostics available.
+- **Next implementation review:** open SD-01 for the native decomposition
+  result and solver pass-through contract. A proposed first slice is the
+  constrained filter, `l2_l1d2_constrained`, with its clipping caller and the
+  existing analytic wheel check. Resolve the result fields, migration, and
+  scope before editing source. CI-02 is the next CI work package and can use
+  the hosted baseline as optional-extra contracts are resolved.

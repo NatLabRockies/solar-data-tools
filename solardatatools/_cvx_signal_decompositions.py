@@ -17,11 +17,6 @@ This module contains standardized signal decomposition models for use in the SDT
    - `l1d1`: Piecewise constant heuristic, l1-norm of first-order differences
    - `l2d2p365`: Small second-order differences (smooth) and 365-periodic
 
-4. `_cvx_l2_l1d2_constrained`:
-   - `l2`: Gaussian noise, sum-of-squares small or l2-norm squared
-   - `l1d2`: Piecewise linear heuristic
-   - Constrained to have first value at 0 and last value at 1
-
 """
 
 import numpy as np
@@ -286,39 +281,3 @@ def make_l1_pwc_smoothper_trend_problem(metric, w2, w3, w4, tv_weights=None):
     ]
     problem = cvx.Problem(cvx.Minimize(cost), constraints)
     return problem, tv_weights_param
-
-
-def _cvx_l2_l1d2_constrained(
-    signal, w1=1e1, return_all=False, solver="MOSEK", verbose=False
-):
-    """
-    Used in solardatatools/algorithms/clipping.py
-
-    This is a convex problem and the default solver across SDT is OSQP.
-
-    :param signal: A 1d numpy array (must support boolean indexing) containing
-        the signal of interest
-    :param w0: Weight on the residual component
-    :param w1: The regularization parameter on l1d2 component
-    :param return_all: Returns all components and the objective value. Used for tests.
-    :param solver: Solver to use for the decomposition
-    :param verbose: Sets verbosity
-    :return: A tuple with returning the signal, the l1d2 component estimate, and the weight
-    """
-    use_ixs = ~np.isnan(signal)
-
-    y_hat = cvx.Variable(len(signal))
-    mu = cvx.Parameter(nonneg=True)
-    mu.value = w1
-    error = cvx.sum_squares(signal[use_ixs] - y_hat[use_ixs])
-    reg = cvx.norm(cvx.diff(y_hat, k=2), p=1)
-
-    objective = cvx.Minimize(error + mu * reg)
-    constraints = [y_hat[0] == 0, y_hat[-1] == 1]
-    problem = cvx.Problem(objective, constraints)
-    problem.solve(solver=solver, verbose=verbose)
-
-    if return_all:
-        return y_hat.value, problem.objective.value
-
-    return signal, y_hat.value, mu.value

@@ -63,8 +63,9 @@ def check_transforms_and_plot():
 
 def check_public_solve():
     ramp = np.linspace(0, 1, 21)
-    # Use the public result convention until SD-01 introduces named components.
-    _, fitted, _ = l2_l1d2_constrained(ramp, solver="CLARABEL")
+    result = l2_l1d2_constrained(ramp, solver="CLARABEL")
+    assert result.has_fit, result.diagnostics
+    fitted = result.components["trend"]
     assert fitted.shape == ramp.shape, fitted.shape
     assert np.isfinite(fitted).all()
     np.testing.assert_allclose(fitted, ramp, atol=1e-4, rtol=0)

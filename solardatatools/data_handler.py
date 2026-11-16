@@ -729,6 +729,9 @@ class DataHandler:
                 self.inverter_clipping is None
                 or self.daily_flags.inverter_clipped is None
             ):
+                fit = getattr(self.clipping_analysis, "fit_result", None)
+                if fit is not None and fit.diagnostics.failure_reason:
+                    raise _UnavailableResult(fit.diagnostics.failure_reason)
                 raise _UnavailableResult("Clipping results are unavailable.")
 
         def detect_capacity_change():
@@ -756,6 +759,12 @@ class DataHandler:
                 self.daily_flags.inverter_clipped = None
             if self.daily_scores is not None:
                 self.daily_scores.clipping_1 = self.daily_scores.clipping_2 = None
+        else:
+            fit = getattr(self.clipping_analysis, "fit_result", None)
+            if fit is not None and fit.diagnostics.warnings:
+                self._stage_outcomes["clipping"]["warning"] = " ".join(
+                    fit.diagnostics.warnings
+                )
         if not self._run_stage(
             "dataset scores", self.score_data_set, requires=("daily flags",)
         ):
@@ -1375,13 +1384,18 @@ class DataHandler:
             self.data_clearness_score = None
         return
 
-    def clipping_check(self, solver="OSQP"):
+    def clipping_check(self, solver="CLARABEL", *, solver_options=None):
+        self.inverter_clipping = self.num_clip_points = None
+        self.daily_scores.clipping_1 = self.daily_scores.clipping_2 = None
+        self.daily_flags.inverter_clipped = None
+        self.boolean_masks.clipped_times = None
         if self.clipping_analysis is None:
             self.clipping_analysis = ClippingDetection()
         self.clipping_analysis.check_clipping(
             self.filled_data_matrix,
             no_error_flag=self.daily_flags.no_errors,
             solver=solver,
+            solver_options=solver_options,
         )
         self.inverter_clipping = self.clipping_analysis.inverter_clipping
         self.num_clip_points = self.clipping_analysis.num_clip_points
@@ -1389,9 +1403,9 @@ class DataHandler:
         self.daily_scores.clipping_2 = self.clipping_analysis.clip_stat_2
         self.daily_flags.inverter_clipped = self.clipping_analysis.clipped_days
 
-    def find_clipped_times(self, solver_convex="CLARABEL"):
+    def find_clipped_times(self, solver_convex="CLARABEL", *, solver_options=None):
         if self.clipping_analysis is None:
-            self.clipping_check(solver=solver_convex)
+            self.clipping_check(solver=solver_convex, solver_options=solver_options)
         self.clipping_analysis.find_clipped_times()
         self.boolean_masks.clipped_times = self.clipping_analysis.clipping_mask
 
