@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-13, SD-01 constrained filter and clipping migrated
+- Last revised: 2026-11-16, SD-07 sparse-compilation memory proposal added
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -1283,6 +1283,12 @@ with no usable candidate is a numerical failure, not a no-change finding.
   follow-up under CLIP-02. The local base suite passed 119 tests with two
   skips. The sdist and wheel passed Twine, and the isolated installed-wheel
   smoke passed.
+- **Memory follow-up:** SD-07 uses this migrated filter and its clipping caller
+  as the first bounded memory-verification target. Its `sum_squares` residual
+  penalty avoids gfosd's explicit unannotated quadratic-form construction;
+  first-compilation and repeated-solve peak memory remain to be measured.
+  This follow-up does not change the accepted model or the separate CLIP-02
+  disposition.
 
 ### `solardatatools/_osd_signal_decompositions.py`
 
@@ -1652,6 +1658,8 @@ with no usable candidate is a numerical failure, not a no-change finding.
   dimensional changes. Reset the initial IRL1 weights for each structural
   candidate unless continuation is explicitly part of the algorithm; otherwise
   the sweep order becomes an unrecorded modeling choice.
+  SD-07 separately addresses dense materialization during curvature checks and
+  compilation. Reuse and DPP do not bound the first compilation's peak memory.
 - **Source-derived opportunities:**
 
   | Operation | Current repeated work | Proposed reduction |
@@ -1676,6 +1684,74 @@ with no usable candidate is a numerical failure, not a no-change finding.
   Coordinate with CLIP-01, SHADE-03, and QA-04.
 - **References:** [CVXPY DPP](https://www.cvxpy.org/tutorial/dpp/index.html),
   [CVXPY warm starts](https://www.cvxpy.org/tutorial/solvers/index.html#warm-start).
+
+#### SD-07 — Preserve sparse structure through quadratic modeling and compilation [performance defect and verification proposal]
+
+- **Locations:** the legacy gfosd CVXPY path in `sig-decomp` 0.3.2,
+  `gfosd/problem.py::_solve_cvx`; CVXPY's quadratic-form curvature checks and
+  `utilities.linalg.is_diagonal`; native SDT builders organized under SD-06.
+  The first native verification target is `_l2_l1d2_constrained.py` and its
+  clipping caller, followed by the remaining model-specific migrations.
+- **Reported evidence:** [SDT issue #238](https://github.com/NatLabRockies/solar-data-tools/issues/238)
+  reports about 5.62 GB of additional peak RSS for the clipping filter's
+  5,000-point CDF, and a long-record pipeline peak reduced from about 38 GB to
+  1.5 GB with approximately a threefold speedup after avoiding the dense check.
+  Those are the reporter's measurements, not independently reproduced results
+  from this review. The reported environment includes SDT 2.1.5, sig-decomp
+  0.3.2, and CVXPY 1.9.3. A displayed 0.00 GB increase is rounded sampled RSS,
+  not evidence of zero allocation.
+- **Source-confirmed mechanism, 2026-11-16:** gfosd constructs
+  `quad_form(x, P)` from a sparse matrix without declaring its known curvature.
+  CVXPY's sparse `is_diagonal` implementation materializes the off-diagonal
+  matrix with `toarray()`. This code is present in the inspected local CVXPY
+  1.8.1 installation and the published 1.9.3 source. When this check is reached,
+  the dense array requires $O(N^2)$ storage, with additional comparison
+  temporaries, where $N$ is the stacked optimization-variable dimension rather
+  than the raw acquisition sample count. Exposure depends on the curvature-check
+  path and dependency versions. The concavity query also matters: checking
+  whether $P\preceq0$ tests $-P$ for positive semidefiniteness and can reach the
+  dense path even when $P\succeq0$ is cheaply certified.
+- **Native modeling requirement:** express a known squared-norm penalty
+  $\|Lx\|_2^2$ directly with `sum_squares(L @ x)` and retain sparse operators
+  where the model supplies them, rather than unnecessarily forming
+  $P=L^T L$. When an explicit quadratic form is appropriate, use `psd_wrap(P)`
+  or `assume_PSD=True` only with a construction establishing $P\succeq0$ and
+  validated parameter domains, including nonnegative penalty weights. These
+  annotations assert curvature; they do not project or repair an indefinite
+  matrix. Preserve all agreed costs, constraints, normalization, and solver
+  options. Native CVXPY and DPP alone do not establish sparse compilation, and
+  avoiding this allocation does not guarantee linear memory use by the solver.
+- **Released-code mitigation, separate disposition:** assess a narrowly scoped
+  gfosd PSD annotation or an upstream sparse-aware CVXPY correction and an
+  appropriate dependency release for affected users. Verify the applicable
+  construction and versions before recommending either fix. This compatibility
+  decision does not restore OSD as SDT's modeling direction or require delaying
+  native migration. A global runtime monkeypatch is not the proposed supported
+  SDT solution. Upstream edits, dependency changes, and releases require their
+  own implementation scope.
+- **Sequence and boundaries:** begin with bounded memory verification of the
+  already migrated SD-01 constrained filter and clipping path, then apply the
+  requirement during subsequent native-model checkpoints. Keep this distinct
+  from SD-06's repeated-construction optimization and LFA's soiling-dictionary
+  replacement. Do not reopen accepted model choices or change clipping
+  thresholds to reduce memory. Decide any released-code mitigation separately.
+- **Proposed verification:** use deterministic inputs at increasing, bounded
+  sizes in fresh processes. Specify memory/time limits before running; do not
+  reproduce the largest reported allocation solely to confirm the diagnosis.
+  Record dependency versions, solver/options, model dimensions and sparse
+  nonzero counts, absolute peak RSS and baseline-relative increase, and the
+  measurement method/resolution. Distinguish construction, curvature checking
+  and canonicalization, numerical solution, and repeated solves; evaluate the
+  first compilation separately from cached re-solves. Check that the affected
+  sparse path avoids unnecessary dense materialization and compare objectives,
+  feasibility, and relevant fitted quantities against the same mathematical
+  model. Include the actual 5,000-point clipping case only within the agreed
+  resource budget. Do not require bitwise identity for nonunique optima or claim
+  a universal speedup from one record. Coordinate numerical checks with QA-04;
+  any CI regression should be bounded and should not depend on reproducing an
+  out-of-memory termination.
+- **References:** [CVXPY 1.9.3 linear-algebra utilities](https://github.com/cvxpy/cvxpy/blob/v1.9.3/cvxpy/utilities/linalg.py),
+  [CVXPY 1.9.3 quadratic-form implementation](https://github.com/cvxpy/cvxpy/blob/v1.9.3/cvxpy/atoms/quad_form.py).
 
 ## 3. Analysis algorithms
 
@@ -3988,6 +4064,10 @@ tests, installations, or experiments.
 - **Performance evidence:** the source-derived counts in SD-06 identify repeated
   work, not measured savings. Benchmark the agreed models only after correctness
   checks, recording graph construction/canonicalization separately from solving.
+  SD-07 adds bounded first-compilation and repeated-solve memory verification,
+  with source-confirmed allocation paths distinguished from externally reported
+  RSS and timing measurements. Check preservation of the mathematical model
+  alongside memory behavior; passing DCP/DPP checks does not establish the latter.
 
 ## 9. Issue decision and completion record
 
@@ -5360,3 +5440,27 @@ register.
   existing analytic wheel check. Resolve the result fields, migration, and
   scope before editing source. CI-02 is the next CI work package and can use
   the hosted baseline as optional-extra contracts are resolved.
+
+### 2026-11-16 — SD-07 sparse-compilation memory proposal recorded
+
+- **Owner direction:** add the memory issue to the working plan and obtain a
+  review of the plan change from `sdt-review`.
+- **Disposition:** record SDT issue #238 under SD-07, immediately after SD-06,
+  with cross-references from the migrated constrained-filter checkpoint and
+  QA-04. Start the proposed verification with that native filter; carry the
+  sparse-modeling requirement into subsequent migrations. Any mitigation for
+  affected released versions remains a separately scoped compatibility decision.
+- **Evidence:** source inspection confirmed the allocation path in local
+  gfosd/sig-decomp 0.3.2 and CVXPY 1.8.1 and in the published CVXPY 1.9.3 source.
+  The issue's memory and speedup measurements have not been independently
+  reproduced. No memory experiment or numerical solve was run for this entry.
+- **Authorization:** edit this plan and request its review only. This entry
+  authorizes no source/dependency edits, benchmark execution, or release action.
+- **Independent plan reviews, 2026-11-16:** `sdt-review` returned no findings
+  at both the public-tool and scientific registers for the same unchanged
+  proposal. The reviews checked source support, quadratic scaling, PSD
+  assumptions, evidence attribution, scope, and the proposed validation.
+  These were source and analytical reviews, not empirical validation of the
+  reported memory reduction or speedup. Exact benchmark settings and comparison
+  tolerances remain implementation-stage specifications. No solves or memory
+  benchmarks were run; this paragraph records the completed reviews only.
