@@ -97,7 +97,13 @@ def _copy_solver_options(options):
 
 
 class _L2L1D2ConstrainedWorkspace:
-    """Reuse a DPP problem for a fixed known set and return fit snapshots."""
+    """Reuse expressions for a fixed known set and return fit snapshots.
+
+    The default quadratic CLARABEL path disables DPP caching to avoid CVXPY's
+    dense parameter-coefficient intermediate. Each solve recompiles the model;
+    expression and backend reuse remain separate from that compilation cache.
+    Explicit caller compilation options retain their requested behavior.
+    """
 
     def __init__(self, size):
         self.size = size
@@ -151,6 +157,16 @@ class _L2L1D2ConstrainedWorkspace:
             raise ValueError(
                 f"Unsupported solver_options keys: {', '.join(sorted(reserved))}."
             )
+        if (
+            solver == "CLARABEL"
+            and "ignore_dpp" not in options
+            and not options.get("enforce_dpp", False)
+            and options.get("use_quad_obj", True)
+        ):
+            # DPP coefficient extraction densifies a mostly-zero parameter map
+            # in CVXPY 1.7.5–1.9.3. Keep the quadratic model and numerical
+            # settings while allowing callers to opt into another compile path.
+            options["ignore_dpp"] = True
         diagnostics = SolveDiagnostics(solver, _copy_solver_options(options))
 
         if not mask.any():

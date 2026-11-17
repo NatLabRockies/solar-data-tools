@@ -4,6 +4,7 @@ from dataclasses import replace
 import cvxpy as cp
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
 from solardatatools import DataHandler
 from solardatatools._l2_l1d2_constrained import _L2L1D2ConstrainedWorkspace
@@ -31,7 +32,8 @@ def test_filter_weights_match_analytic_three_point_solution(solver):
         )
         objective = w0 * (0.9 - middle) ** 2 + 2 * w1 * abs(middle - 0.5)
         assert result.diagnostics.objective_value == pytest.approx(objective, abs=1e-6)
-        assert result.diagnostics.solver_options == options
+        expected = {"ignore_dpp": True} if solver == "CLARABEL" else options
+        assert result.diagnostics.solver_options == expected
 
 
 def test_filter_residual_and_anchors_respect_missing_and_held_out_values():
@@ -102,7 +104,113 @@ def test_reused_workspace_does_not_inherit_iteration_limit():
     assert not limited.has_fit
     recovered = workspace.solve(signal)
     assert recovered.has_fit, recovered.diagnostics
-    assert recovered.diagnostics.solver_options == {}
+    assert recovered.diagnostics.solver_options == {"ignore_dpp": True}
+
+
+@pytest.mark.parametrize(
+    ("solver", "options", "effective"),
+    [
+        (None, {}, {"ignore_dpp": True}),
+        ("CLARABEL", {"max_iter": 100}, {"max_iter": 100, "ignore_dpp": True}),
+        ("CLARABEL", {"ignore_dpp": False}, {"ignore_dpp": False}),
+        ("CLARABEL", {"ignore_dpp": True}, {"ignore_dpp": True}),
+        ("CLARABEL", {"enforce_dpp": True}, {"enforce_dpp": True}),
+        (
+            "CLARABEL",
+            {"enforce_dpp": False},
+            {"enforce_dpp": False, "ignore_dpp": True},
+        ),
+        ("CLARABEL", {"use_quad_obj": False}, {"use_quad_obj": False}),
+        (
+            "CLARABEL",
+            {"use_quad_obj": True},
+            {"use_quad_obj": True, "ignore_dpp": True},
+        ),
+        ("OSQP", {}, {}),
+    ],
+)
+def test_filter_compilation_defaults_preserve_caller_options(
+    monkeypatch, solver, options, effective
+):
+    original_solve = cp.Problem.solve
+    calls = []
+
+    def solve(problem, **kwargs):
+        calls.append(kwargs.copy())
+        return original_solve(problem, **kwargs)
+
+    monkeypatch.setattr(cp.Problem, "solve", solve)
+    original_options = options.copy()
+    result = l2_l1d2_constrained([0, 0.9, 1], solver=solver, solver_options=options)
+    assert result.has_fit, result.diagnostics
+    assert result.diagnostics.solver_options == effective
+    assert calls == [{"solver": solver or "CLARABEL", "verbose": False, **effective}]
+    assert options == original_options
+
+
+def test_conflicting_explicit_dpp_options_remain_errors():
+    options = {"ignore_dpp": True, "enforce_dpp": True}
+    with pytest.raises(cp.error.DPPError, match="enforce_dpp.*ignore_dpp"):
+        l2_l1d2_constrained([0, 0.9, 1], solver_options=options)
+    assert options == {"ignore_dpp": True, "enforce_dpp": True}
+
+
+def test_workspace_can_return_to_default_compilation_after_explicit_dpp():
+    signal = np.linspace(0, 1, 40) ** 2
+    workspace = _L2L1D2ConstrainedWorkspace(signal.size)
+    first = workspace.solve(signal)
+    first_trend = first.components["trend"].copy()
+    cached = workspace.solve(signal, solver_options={"enforce_dpp": True})
+    changed = signal + 0.01 * np.sin(np.linspace(0, np.pi, signal.size))
+    restored = workspace.solve(changed, w1=3)
+    fresh = l2_l1d2_constrained(changed, w1=3)
+    assert all(result.has_fit for result in (first, cached, restored, fresh))
+    assert cached.diagnostics.solver_options == {"enforce_dpp": True}
+    assert restored.diagnostics.solver_options == {"ignore_dpp": True}
+    np.testing.assert_allclose(
+        restored.components["trend"], fresh.components["trend"], atol=1e-8
+    )
+    np.testing.assert_array_equal(first.components["trend"], first_trend)
+
+
+@pytest.mark.parametrize("entry", ["filter", "clipping"])
+def test_default_filter_and_clipping_avoid_large_sparse_to_dense_conversion(
+    monkeypatch, entry
+):
+    # Reject oversized requests before allocation, rather than testing RSS or
+    # reproducing an OOM. The observed 1,000-point DPP intermediate is ~8 MiB.
+    def guard(original):
+        def convert(matrix, *args, **kwargs):
+            size = int(np.prod(matrix.shape)) * matrix.dtype.itemsize
+            assert size < 4 * 1024**2, "large sparse-to-dense compilation request"
+            return original(matrix, *args, **kwargs)
+
+        return convert
+
+    for cls in (
+        sp.csc_matrix,
+        sp.csr_matrix,
+        sp.coo_matrix,
+        sp.csc_array,
+        sp.csr_array,
+    ):
+        for name in ("toarray", "todense"):
+            monkeypatch.setattr(cls, name, guard(getattr(cls, name)))
+    with pytest.raises(AssertionError, match="large sparse-to-dense"):
+        sp.csc_matrix((1000, 1000)).toarray()
+
+    if entry == "filter":
+        signal = np.linspace(0, 1, 1000) ** 2
+        result = l2_l1d2_constrained(signal)
+    else:
+        data = np.tile([0, 5, 10, 10, 10, 5, 0], (12, 1)).T.astype(float)
+        detector = ClippingDetection()
+        detector.check_clipping(data)
+        result = detector.fit_result
+        assert detector.cdf_y.size == 5000
+        assert detector.clipped_days.shape == (12,)
+    assert result.has_fit, result.diagnostics
+    assert result.diagnostics.solver_options == {"ignore_dpp": True}
 
 
 @pytest.mark.parametrize(
@@ -117,8 +225,9 @@ def test_reused_workspace_does_not_inherit_iteration_limit():
 def test_filter_accepts_only_usable_solver_results(
     monkeypatch, status, values, has_fit, reason
 ):
-    def solve(problem, *, solver, verbose, max_iter):
+    def solve(problem, *, solver, verbose, max_iter, ignore_dpp):
         assert (solver, verbose, max_iter) == ("CLARABEL", True, 100)
+        assert ignore_dpp is True
         variables = {variable.name(): variable for variable in problem.variables()}
         variables["trend"].value = np.array(values)
         variables["residual"].value = np.zeros(3)
@@ -162,7 +271,7 @@ def test_clipping_reuse_matches_a_fresh_fit_and_clears_failed_repeat(monkeypatch
     fresh = ClippingDetection()
     fresh.check_clipping(second_data, weight=2)
     assert detector._filter_workspace is workspace
-    assert detector.fit_result.diagnostics.solver_options == {}
+    assert detector.fit_result.diagnostics.solver_options == {"ignore_dpp": True}
     np.testing.assert_allclose(detector.y_hat, fresh.y_hat, atol=1e-8)
     np.testing.assert_array_equal(detector.clipped_days, fresh.clipped_days)
     np.testing.assert_array_equal(first.components["trend"], first_trend)

@@ -65,6 +65,7 @@ def check_public_solve():
     ramp = np.linspace(0, 1, 21)
     result = l2_l1d2_constrained(ramp, solver="CLARABEL")
     assert result.has_fit, result.diagnostics
+    assert result.diagnostics.solver_options == {"ignore_dpp": True}
     fitted = result.components["trend"]
     assert fitted.shape == ramp.shape, fitted.shape
     assert np.isfinite(fitted).all()

@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-17, deferred public-issue follow-ups recorded outside PR #237
+- Last revised: 2026-11-17, SD-07 scoped workaround implemented and verified; DH-10 DST change reporting planned
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -94,7 +94,7 @@ tracked within the current cleanup under TIME-02 and QUALITY-02; issue
 SD-07 and its SD-01 cross-reference. Neither is deferred by this section, and
 their recorded verification requirements remain unchanged.
 
-### Latest completion status (2026-11-16)
+### Latest completion status (2026-11-17)
 
 The most recent source checkpoint is committed in `574b6ab`: the native
 `l2_l1d2_constrained` filter, named result and diagnostics, reusable clipping
@@ -105,7 +105,17 @@ recorded verification is 121 base tests passed with two skips; independent
 review passed 52 focused tests with one skip, eight additional numerical cases,
 and the exact rebuilt wheel's isolated smoke check. Those checks were not rerun
 for this plan update. CLIP-02's
-false-positive investigation and SD-07's memory measurements remain open.
+false-positive investigation remains open. SD-07's first bounded memory
+verification is now recorded below: numerical checks pass, but first
+compilation still requests a quadratic-size dense parameter-coefficient array.
+The subsequent canonicalization/version comparison recommends retaining the
+quadratic path with `ignore_dpp=True` for this filter's default CLARABEL path;
+it removes the observed allocation while passing the fixed numerical checks.
+Conic execution failed the agreed numerical checks at 1,000 points and hit the
+memory stop during 5,000-point compilation in CVXPY 1.8.1. The scoped workaround
+is now implemented and locally verified; independent public-tool review and owner
+acceptance are required for its handoff. Other native models, upstream repair,
+and released-code mitigation remain open under SD-07.
 The subsequent commit `8d2dc04` records the reviewed SD-07 proposal only; it
 implements no memory mitigation. QUALITY-02 below is newly planned work.
 Section 9 retains the preceding completed pipeline, grid, and CI checkpoints.
@@ -626,6 +636,47 @@ implementation requests.
   focused headless rendering checks without requiring pixel-identical output.
 - **Authorization:** continue with the behavior-preserving plotting extraction
   and its focused verification. The approved sequence places DH-07 afterward.
+
+#### DH-10 — Report whether explicit DST correction changed the input [API enhancement]
+
+- **Status and scope, 2026-11-17:** planned within the current cleanup PR #237,
+  following [discussion #216](https://github.com/NatLabRockies/solar-data-tools/discussions/216).
+  This bounded item covers `DataHandler.fix_dst()` only; it is not one of the
+  deferred post-cleanup follow-ups above.
+- **Location:** `solardatatools/data_handler.py`, `DataHandler.fix_dst`.
+- **Observed behavior:** every successful call currently returns `None`, both
+  when timestamps or rows change and when the operation leaves data unchanged.
+  The private already-run flag records execution, not whether data changed.
+  Bounded checks confirmed unchanged winter-only input, shifted summer input,
+  removal of ambiguous/nonexistent transition rows, and unchanged repeat calls.
+- **Planned contract:** return a Python `bool` indicating whether this call
+  changed the stored input data. For the existing correction, determine that
+  from the original and corrected timestamp indexes, including removed rows.
+  Return `True` for shifted timestamps or removed rows and `False` for an
+  unchanged first call or an already-performed no-op. A successful winter-only
+  call still sets the already-run guard even when it returns `False`.
+- **Behavior boundary:** preserve the existing timezone assumptions, timestamp
+  conversion, transition-row handling, repeat-call guard/message, and exception
+  behavior. A failure must not be reported as `False`. This item does not change
+  correction algorithms, derived-state invalidation, or pipeline sequencing.
+  DH-07's preservation of explicit DST preprocessing across reruns remains in
+  force. Update the method documentation and user guide to explain that the
+  result describes a change on this call, not detection of a DST problem.
+- **Compatibility and exclusions:** existing callers that ignore the return
+  value continue to work; callers testing for `None` will see the documented
+  return-value change. Do not change `auto_fix_time_shifts()` or
+  `fix_daylight_savings_with_known_tz()` here. The former's nonzero-correction
+  flag differs from a per-call mutation result, and the latter already returns
+  a DataFrame in its default mode. Other correction methods require separately
+  agreed return contracts.
+- **Proposed verification:** assert Boolean type and values for winter-only,
+  summer, spring-gap, fall-overlap, and repeated-call inputs; verify corrected
+  timestamps, retained values, and removed rows against existing behavior.
+  Include failure propagation without setting the successful-run guard and
+  retain the existing pipeline-rerun regression. No numerical solves are needed
+  for the focused return-value cases.
+- **Authorization:** add this item to the current plan and draft the discussion
+  response. Implementation and its tests are not performed by this plan update.
 
 ### `solardatatools/time_axis_manipulation.py`
 
@@ -1416,7 +1467,9 @@ with no usable candidate is a numerical failure, not a no-change finding.
 - **Memory follow-up:** SD-07 uses this migrated filter and its clipping caller
   as the first bounded memory-verification target. Its `sum_squares` residual
   penalty avoids gfosd's explicit unannotated quadratic-form construction;
-  first-compilation and repeated-solve peak memory remain to be measured.
+  the November 17 measurements below cover first compilation and repeated
+  solves. They expose a separate dense parameter-coefficient extraction in
+  CVXPY 1.8.1, so sparse compilation is not yet established.
   This follow-up does not change the accepted model or the separate CLIP-02
   disposition.
 
@@ -1817,6 +1870,183 @@ with no usable candidate is a numerical failure, not a no-change finding.
 
 #### SD-07 — Preserve sparse structure through quadratic modeling and compilation [performance defect and verification proposal]
 
+- **Status, 2026-11-17:** the first bounded verification and the subsequent
+  owner-authorized canonicalization/version comparison are complete. The
+  unchanged quadratic DPP path still requests a quadratic-size dense array.
+  The additional quadratic `ignore_dpp=True` comparison passes the agreed
+  checks and removes the observed conversion. The owner-approved scoped default
+  is now implemented and locally verified, with effective options reported and
+  explicit caller choices preserved. Conic results include numerical failures
+  and a resource stop. Independent public-tool review and owner acceptance are
+  required for the bounded checkpoint. Other models, upstream sparse extraction,
+  and released-code mitigation remain open. Dependency declarations are unchanged.
+- **Initial protocol:** use fresh, sequential subprocesses at 200, 1,000,
+  and 5,000 grid points for the native filter. Exercise the public clipping
+  path at its actual 5,000-point CDF resolution, including repeated fits.
+  Stop a subprocess at 1 GiB sampled RSS, 60 CPU seconds, or 120 wall
+  seconds. Stop the sequence if a limit is reached. Sample RSS every 10 ms
+  and also record the kernel process high-water mark. Record imports as a
+  baseline, then construction, first curvature check, canonicalization,
+  numerical solution, and repeated solves. Sampled phase peaks can miss
+  shorter allocations. Run timings without allocation tracing separately from sparse
+  allocation tracing. Compare the native objective and feasibility against a
+  direct same-model CVXPY reference using `rtol=1e-5, atol=1e-7` for the
+  objective, the filter's existing feasibility tolerances, and `atol=1e-4`
+  for the fitted curve. Report a tolerance failure explicitly.
+  Record local versions and the source revision with every result. Keep the
+  reproducible measurement script and raw outputs as local workspace artifacts.
+- **Measured environment and cases:** repository `a474f9e` (native source from
+  the committed SD-01 checkpoint), macOS arm64, Python 3.13, CVXPY 1.8.1,
+  SciPy 1.17.0, NumPy 2.4.2, Clarabel 0.11.1, sig-decomp 0.3.2, and
+  psutil 7.2.2; CLARABEL with empty solver options. The deterministic filter
+  cases use all-known curves at the three sizes above. Clipping cases use a
+  synthetic 96-by-193 daily-profile matrix and
+  `tests/fixtures/data_transforms/timeseries.csv` (`ac_power_01`). For this
+  direct clipping experiment, the fixture is explicitly DST-corrected,
+  standardized, embedded as 288-by-193, and zero-filled at missing entries;
+  no quality-day mask is supplied. This preparation differs from the full
+  PV pipeline, so its detection counts are not a pipeline before/after test.
+- **Observed memory and timings:** post-import RSS ranged from 377 to 399 MiB
+  in the timing cases. Kernel process high-water marks through native fits
+  (before the fresh reference) were 430, 419, and 488 MiB for the 200-,
+  1,000-, and 5,000-point filters; corresponding increases above current
+  post-import RSS were 37, 21, and 103 MiB. The first two peaks include import
+  transients and are not model-only allocation measurements. Synthetic and
+  fixture clipping peaks were 494 and 485 MiB, increases of 102 and 108 MiB.
+  First filter canonicalization took 0.0062, 0.0087, and 0.0185 seconds;
+  numerical solution took 0.0025, 0.0548, and 0.0759 seconds. Synthetic and
+  fixture first clipping fits took 0.146 and 0.127 seconds; repeated fits
+  took 0.102 and 0.137 seconds, with cached compilation below 0.001 seconds.
+  These are single local observations. The largest sampled peak among the
+  completed timing and confirmed trace cases, including fresh references,
+  was 540.31 MiB. No completed case reached an RSS, CPU, or wall-time limit.
+- **Remaining allocation, independently observed:** allocation traces at
+  1,000 and 5,000 points identify CVXPY 1.8.1
+  `utilities/coeff_extractor.py:110`,
+  `c = param_coeffs[:-1, :].toarray()`. The respective sparse inputs have
+  shapes 999-by-1,003 (999 nonzeros) and 4,999-by-5,003 (4,999 nonzeros),
+  requesting 8,015,976 and 200,079,976 dense bytes (7.64 and 190.81 MiB).
+  Fixture clipping makes the same 5,000-point request. This is a different
+  allocation from the legacy PSD-check path below. The observed shape for
+  this all-known model is $(T-1)\times(T+3)$, so sparse final matrices and
+  acceptable sampled RSS do not establish sparse intermediate compilation.
+  Cached native re-solves caused no further observed sparse-to-dense request
+  of at least 1 MiB. Requested array storage and resident process memory are
+  distinct quantities; exact physical residency was not established.
+- **Numerical evidence:** objective, linking/endpoint feasibility, fitted-curve
+  reference comparisons, changed-data/weight re-solves, and previous-result
+  snapshot checks all passed at the prespecified tolerances. Maximum fitted
+  curve difference in the timing cases was $2.17\times10^{-5}$. The fixture
+  retains `optimal_inaccurate` and its warning; first-fit linking and endpoint
+  errors were $1.30\times10^{-13}$ and $7.06\times10^{-13}$. At 5,000 points,
+  the final sparse QP has 14,998 scalar variables, 5,000 nonzeros in `P`, and
+  49,986 in `A`; these counts do not describe intermediate storage.
+- **Evidence artifacts:** the reproducible script, report, per-phase events,
+  RSS samples, stacks, stderr, and source/fixture hashes are retained locally
+  under `/Users/bmeyers/.codex/visualizations/2026/11/11/01a1ccd3-3ac8-7911-b0b3-304224adb346/sd07-memory-20261117/`;
+  see `README.md`, `verified-results/`, and `confirmed-traces/`. An initial
+  harness-only CVXPY unpacking error and deliberate 128 MiB allocation-guard
+  stop are retained too. Completed confirmed traces permit up to 256 MiB per
+  observed conversion under the unchanged process resource limits. Tracing is
+  temporary instrumentation in disposable subprocesses, not an SDT patch.
+- **Comparison scope (completed below):** compare supported canonicalization paths and
+  applicable dependency versions under the same bounds and numerical checks,
+  then agree a remedy for this parameter-coefficient allocation. Preserve the
+  model, public option forwarding, and solver semantics. No new default,
+  dependency change, or released-code mitigation is selected by these results.
+- **Authorized comparison protocol, 2026-11-17:** the owner approved that
+  comparison and requested a recommendation before production edits. Compare
+  the native quadratic-objective path with `use_quad_obj=False` conic
+  canonicalization using CVXPY 1.7.5 (Python 3.10 compatibility boundary),
+  local 1.8.1, maintenance patch 1.8.2, and current release 1.9.3. Install
+  comparison packages only in isolated local artifact directories, retaining
+  the existing numerical libraries and CLARABEL version. Use the existing
+  deterministic filter at 200, 1,000, and 5,000 points and the same directly
+  prepared 5,000-point fixture clipping case. Measure timings separately from
+  sparse conversion tracing at 1,000/5,000 points and fixture clipping. Retain
+  the 1 GiB sampled RSS, 60 CPU-second, 120 wall-second per-process limits,
+  10 ms sampling, and 256 MiB per-conversion trace guard; stop measurements on
+  a resource-limit event. Bound the full measurement sequence to ten minutes.
+  Preserve the previous numerical acceptance tolerances, retain status and
+  warning differences, and compare objectives, curves, and clipping decisions
+  across paths/versions. Record failures without loosening tolerances. Check
+  reuse and result snapshots, and include bounded missing-data and zero-weight
+  contract checks. This authorizes experiments and plan/artifact updates;
+  production code, dependency declarations, and defaults remain unchanged.
+- **Comparison resource stop and bounded continuation:** CVXPY 1.8.1's conic
+  path at 5,000 filter points crossed the 1 GiB RSS stop during first
+  canonicalization, before numerical solution; the monitor observed 1,094.88
+  MiB and killed the process. The initial sequence stopped as specified.
+  Continue with conic execution restricted to 200/1,000-point filters across
+  the four versions, retaining full-size quadratic/filter/clipping cases.
+  Do not repeat 5,000-point conic compilation or clipping under these limits.
+  Keep all limits and numerical tolerances unchanged, with a fresh ten-minute
+  budget for the reduced continuation. This bounds the remaining comparison;
+  it does not establish that newer conic paths fail at the untested size.
+- **Additional bounded quadratic comparison:** because default conic compilation
+  reached the resource stop and its 1,000-point objective comparison failed the
+  agreed tolerance, also test `ignore_dpp=True` on the unchanged quadratic model
+  across the selected versions. This measures a prospective workaround through
+  existing public CVXPY option forwarding, including repeated-fit compilation
+  costs; it does not select a new default. Use the same cases, limits, and
+  tolerances, with a separate ten-minute measurement budget.
+- **Comparison results:** 76 completed cases cover CVXPY 1.7.5, 1.8.1,
+  1.8.2, and 1.9.3. The quadratic DPP path makes the same 190.81 MiB dense
+  parameter-coefficient conversion at 5,000 points on all four versions, so
+  an upgrade alone does not remove it. At 1,000 points, conic first-fit
+  objectives differ from the quadratic baseline by $3.17\times10^{-6}$ and
+  trends by $1.107\times10^{-4}$, exceeding the prespecified objective and
+  curve tolerances on every version. Changed-data conic objective comparisons
+  also fail. Feasibility passes; these are numerical-accuracy differences under
+  the fixed settings, not changes to the mathematical model. No tolerances
+  were relaxed. Full-size conic cases on the other versions remain untested
+  after the recorded resource stop. All completed cases stayed below the
+  process limits; their largest sampled peak was 608.25 MiB.
+- **Workaround evidence:** all four quadratic `ignore_dpp=True` variants pass
+  reference, missing-data, zero-weight, no-data, reuse, and snapshot checks.
+  All 64 saved-result comparisons against the 1.8.1 quadratic DPP baseline
+  pass: maximum objective difference $2.34\times10^{-13}$, maximum trend
+  difference $1.80\times10^{-12}$; the 16 clipping-result comparisons preserve
+  point-mass levels, day flags, and sample masks exactly. First fixture fits
+  retain `optimal_inaccurate` and their warnings; repeated fits return
+  `optimal`, consistently across both quadratic routes. None of the 12
+  workaround traces shows a sparse-to-dense request of at least 1 MiB.
+  Final sparse QP dimensions/nonzero counts are unchanged. This removes the
+  observed conversion without establishing universal linear memory scaling.
+- **Measured tradeoff:** in CVXPY 1.8.1, 5,000-point native filter kernel peaks
+  before the fresh reference are 503 MiB with DPP and 428 MiB with it disabled;
+  increases above post-import RSS are 92 and 30 MiB. Same-data filter re-solves
+  take 0.0781 versus 0.0878 seconds. Fixture clipping peaks are 512 versus
+  434 MiB, and repeats take 0.1441 versus 0.1550 seconds. Across versions,
+  repeated 5,000-point filter fits take about 0.073–0.078 seconds with DPP and
+  0.087–0.088 seconds without it. These single observations quantify paying
+  compilation on each call while retaining expression/solver reuse; they are
+  not general performance guarantees.
+- **Approved scoped remedy, implemented:** keep quadratic canonicalization
+  and CLARABEL numerical defaults; make `ignore_dpp=True` a model-specific
+  default for this filter's default quadratic CLARABEL path. Preserve explicit
+  caller choices: explicit `ignore_dpp` wins; absent it, `enforce_dpp=True`
+  retains DPP; explicit conic selection retains its requested path. Preserve
+  CVXPY's rejection of explicitly conflicting flags. Record effective options
+  in existing diagnostics and document recompilation separately from reusable
+  workspace/result ownership. Validate other solver paths before extending the
+  workaround to them. Add bounded allocation and public-caller regressions,
+  rather than an OOM test. Pursue sparse coefficient extraction upstream as the
+  longer-term fix; no global monkeypatch or minimum-version bump is recommended
+  for an allocation still present in 1.9.3. The owner approved this scoped
+  implementation on November 17, with focused regressions and independent
+  public-tool review required. Released gfosd/PSD-check mitigation remains separate.
+- **Comparison artifacts and compatibility limits:** script, metadata/install
+  logs, isolated packages, arrays, traces, measurements, resource-stop record,
+  and source hashes are under
+  `/Users/bmeyers/.codex/visualizations/2026/11/11/01a1ccd3-3ac8-7911-b0b3-304224adb346/sd07-canonicalization-20261117/`;
+  see `README.md` and `comparison-summary.json`. NumPy 2.4.2, SciPy 1.17.0,
+  and Clarabel 0.11.1 are fixed; 1.9.3 has isolated additional required
+  dependencies. All executions use Python 3.13.11. Version 1.7.5 supports
+  Python 3.10 by package metadata, but this was not a Python 3.10 execution
+  test; the other compared releases require Python >=3.11. The shared project
+  environment is unchanged. No independent review was performed for this
+  experiment-only checkpoint.
 - **Locations:** the legacy gfosd CVXPY path in `sig-decomp` 0.3.2,
   `gfosd/problem.py::_solve_cvx`; CVXPY's quadratic-form curvature checks and
   `utilities.linalg.is_diagonal`; native SDT builders organized under SD-06.
@@ -5629,3 +5859,120 @@ register.
   cases, rebuilt-wheel smoke check, and MOSEK limitation. The recheck returned
   no remaining findings at either register. No tests or experiments were run
   for these plan reviews; this is not validation of a replacement screen.
+
+### 2026-11-17 — Discussion #216 bounded DST return-value scope recorded
+
+- **Owner direction:** add the `fix_dst()` return-value change to the current
+  cleanup plan and draft a response to Mark explaining the scope.
+- **Disposition:** DH-10 plans a Boolean indicating actual input changes during
+  the current call, including timestamp shifts and row removal. A successful
+  no-op returns `False`; failures retain exception behavior. Broader changes to
+  other correction methods remain outside this item.
+- **Evidence:** source/caller inspection and four small input checks established
+  current behavior. Existing tests cover preservation of explicit DST correction
+  across pipeline reruns but do not assert the proposed Boolean contract.
+- **Authorization and status:** plan edit and response draft only. No source or
+  test changes, commit, or discussion posting are part of this update.
+
+### 2026-11-17 — SD-07 first bounded memory verification
+
+- **Owner direction:** open SD-07, beginning with bounded memory verification
+  of the migrated filter and clipping path. This supersedes the November 16
+  plan-only benchmark restriction for this bounded checkpoint.
+- **Scope performed:** record limits and numerical acceptance before execution;
+  measure fresh native-filter processes at 200, 1,000, and 5,000 points and the
+  public clipping caller's 5,000-point CDF on deterministic and existing fixture
+  inputs. Separate construction, curvature/canonicalization, numerical solving,
+  and reuse; retain allocation traces and same-model numerical comparisons.
+- **Disposition:** the numerical checks passed within process limits, with the
+  fixture's `optimal_inaccurate` warning retained. A separate quadratic-size
+  dense conversion remains in CVXPY 1.8.1's parameter-coefficient extraction:
+  200,079,976 requested bytes at 5,000 grid points. SD-07 remains open. These
+  results do not reproduce the reporter's legacy peak or establish a universal
+  speedup, sparse intermediate compilation, or a complete native migration.
+- **Changes and boundary:** this checkpoint changes the plan and creates local
+  reproducibility artifacts only. No production source, tests, dependencies,
+  solver defaults, model choices, or clipping thresholds were changed. No
+  independent review, commit, or external publication was performed. The next
+  proposed checkpoint is a bounded comparison to choose a remedy for the
+  observed intermediate allocation; released-code mitigation remains separate.
+
+### 2026-11-17 — SD-07 bounded canonicalization/version comparison
+
+- **Owner direction:** compare quadratic and conic canonicalization and
+  applicable CVXPY versions, preserve the model/public contract, record results,
+  and recommend a remedy before production edits.
+- **Scope performed:** isolated CVXPY 1.7.5/1.8.1/1.8.2/1.9.3 comparison with
+  fixed NumPy/SciPy/CLARABEL, fresh sequential processes, separate timing and
+  allocation traces, and unchanged numerical/resource limits. The initial
+  5,000-point conic compilation hit the 1 GiB RSS stop on 1.8.1; the sequence
+  stopped. The reduced continuation bounded conic cases to 200/1,000 points.
+  An additional unchanged-quadratic `ignore_dpp=True` comparison measured the
+  existing option-forwarding workaround. No limit or tolerance was relaxed.
+- **Results:** the quadratic DPP allocation persists in all four versions.
+  Conic results miss objective/curve acceptance at 1,000 points. All four
+  quadratic DPP-disabled variants pass, preserve clipping decisions, and remove
+  the observed large conversion. The 76 completed comparison cases and the
+  separate stopped case are retained with source/fixture hashes, raw samples,
+  arrays, diagnostics, and reproducible scripts. SD-07 above records the
+  numerical differences, memory/timing tradeoff, and untested cases.
+- **Recommendation:** retain the quadratic model and numerical defaults; use
+  a filter-specific `ignore_dpp=True` default on the validated CLARABEL path,
+  with explicit caller compilation choices authoritative and effective options
+  reported. Document recompilation and add bounded public-caller/allocation
+  regressions. Pursue sparse coefficient extraction upstream; neither a blanket
+  conic switch nor a CVXPY version bump is supported as the remedy here.
+- **Boundary:** the recommendation is pending implementation approval. This
+  checkpoint edits the plan and local experiment artifacts only. Production
+  source/tests, dependency declarations, and defaults are unchanged; the shared
+  environment is unchanged. No independent review, commit, or external posting
+  was performed. SD-07 and released-code mitigation remain open.
+
+### 2026-11-17 — SD-07 scoped workaround authorized
+
+- **Owner direction:** implement the proposed workaround, preserve explicit
+  caller options, record decisions, add focused regressions, and run the
+  build-review loop with `sdt-review` until clean under the public-tool register.
+- **Implementation contract:** inject `ignore_dpp=True` only for the default
+  quadratic CLARABEL path when the caller has not supplied `ignore_dpp`,
+  requested `enforce_dpp=True`, or selected `use_quad_obj=False`. Explicit
+  values, including conflicting explicit flags, pass through unchanged;
+  CVXPY retains its configuration-error behavior. Other solvers' defaults are
+  unchanged. Copy caller mappings and record effective options in existing
+  diagnostics, including no-fit results. Preserve mathematical costs,
+  constraints, weights, masks, results, and CLARABEL numerical settings.
+- **Reuse and verification:** retain the expression workspace and independent
+  snapshots, documenting repeated canonicalization separately from DPP caching.
+  Test public filter/clipping calls with a bounded sparse-conversion guard
+  rejecting oversized requests before allocation, plus option precedence,
+  caller-mapping immutability, and repeated configuration changes. No OOM test
+  or blanket memory-scaling claim is authorized. Review and verification
+  outcomes will be recorded before the owner handoff; no commit is authorized.
+- **Implementation and local verification:** the workspace applies the scoped
+  default without changing its mathematical expressions; the public docstring
+  and reference explain effective options, caller precedence, and recompilation.
+  Focused regressions cover configuration forwarding/errors, caller mapping
+  immutability, configuration changes on a reused workspace, and public filter
+  and actual 5,000-point clipping calls guarded against sparse-to-dense requests
+  of at least 4 MiB. The guard rejects requests before allocation and has a
+  positive control. The installed-wheel smoke also checks the effective default.
+  The full suite passed 134 tests with two skips on Python 3.13.11/CVXPY 1.8.1;
+  all 27 focused tests additionally passed under isolated CVXPY 1.7.5, 1.8.2,
+  and 1.9.3. Ruff 0.9.6 checks/format and `git diff --check` passed. MOSEK and
+  native Python 3.10 execution were not part of this local verification.
+- **Installed artifact check:** a clean VCS-aware snapshot with this source
+  diff produced a wheel whose filter/wrapper bytes match the checkout. The
+  isolated-interpreter smoke passed outside the checkout, importing all four
+  packages and checking packaged resources, transforms/plotting, and the new
+  effective filter option. The diagnostic wheel uses synthetic version
+  `0.0.0+sd07` and SHA-256
+  `0c48d01e6a4b43d3fc8f585084fea368711b9986a4ee12f732db1549b6390047`;
+  it was installed into an artifact target using existing numerical dependencies,
+  not a fresh dependency-resolution environment. A prior Git-less snapshot
+  omitted SCM-discovered resources; the corrected VCS-aware build supersedes
+  that harness failure. Evidence is retained under the local visualization
+  artifact root in `sd07-implementation-20261117/`.
+- **Review gate:** `sdt-review` is the independent reviewer for the authorized
+  public-tool loop; its explicit result and file summary belong in the owner
+  handoff. This record does not claim a clean review or owner acceptance before
+  those steps occur. No staging or commit is authorized by the review loop.

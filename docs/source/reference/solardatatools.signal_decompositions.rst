@@ -49,3 +49,28 @@ Direct calls to ``DataHandler.clipping_check`` and
 ``ClippingDetection.check_clipping`` accept the same solver options. Inspect
 ``ClippingDetection.fit_result`` for the latest fit diagnostics. The pipeline
 continues to select the clipping solver through ``solver_convex``.
+
+Compilation and repeated fits
+----------------------------
+
+For this filter's default quadratic CLARABEL path, SDT adds
+``ignore_dpp=True`` to the effective CVXPY solve options. This avoids a large
+dense parameter-coefficient intermediate observed in CVXPY 1.7.5, 1.8.1,
+1.8.2, and 1.9.3. The model, weights, constraints, and CLARABEL numerical
+defaults are unchanged. Inspect ``result.diagnostics.solver_options`` for
+the effective options, including this default.
+
+The clipping workspace still reuses its expressions for a fixed observation
+mask and returns independent result snapshots. CVXPY recompiles on each solve
+instead of using its disciplined parametrized programming (DPP) cache.
+Backend reuse depends on the solver and settings. This trades compilation
+time on repeated fits for avoiding the observed dense intermediate; it does
+not guarantee a particular memory bound or speedup.
+
+Explicit caller choices take precedence. Pass
+``solver_options={"ignore_dpp": False}`` to retain DPP caching, or
+``solver_options={"enforce_dpp": True}`` to require it. Explicit
+``use_quad_obj=False`` retains conic canonicalization without adding the
+workaround. CVXPY continues to reject conflicting explicit
+``ignore_dpp=True`` and ``enforce_dpp=True`` flags. Other solvers' compilation
+defaults are unchanged. Direct filter and clipping calls use the same rules.

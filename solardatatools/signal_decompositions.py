@@ -262,9 +262,13 @@ def l2_l1d2_constrained(
         positive if an interior sample is excluded. At least one weight must
         be positive.
     :param use_ixs: Optional Boolean mask. Only selected finite values enter
-        the data-fidelity term.
+        the consistency constraint.
     :param solver: CVXPY solver name. CLARABEL is the default.
-    :param solver_options: Keyword arguments forwarded to the selected solver.
+    :param solver_options: Keyword arguments forwarded to CVXPY's solve method.
+        The default quadratic CLARABEL path adds ``ignore_dpp=True`` to avoid
+        a dense compilation intermediate. Explicit ``ignore_dpp``,
+        ``enforce_dpp=True``, or conic ``use_quad_obj=False`` choices are
+        preserved. Effective options are recorded in the diagnostics.
     :param verbose: Enable solver output.
     :returns: Named trend and residual components with an observation mask and
         solve diagnostics. Components are unavailable when the fit fails.
