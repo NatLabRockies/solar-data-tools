@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-16, QUALITY-02 proposal added and latest completion status recorded
+- Last revised: 2026-11-17, deferred public-issue follow-ups recorded outside PR #237
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -44,6 +44,55 @@ first CI work package. P1/P2 labels below preserve provisional materiality
 assessments without establishing an implementation order or superseding owner
 decisions. Design and performance proposals are identified separately from
 demonstrated defects.
+
+### Deferred issue follow-ups after PR #237
+
+The November 16–17 issue triage identified the following work to revisit after
+the current cleanup PR [#237](https://github.com/NatLabRockies/solar-data-tools/pull/237).
+These entries preserve scope and sequencing decisions; they are **outside this
+PR's implementation scope** and are not additional completion or release gates
+for it. Recording them does not authorize implementation or merging another PR.
+
+- **[#202 — Package layout](https://github.com/NatLabRockies/solar-data-tools/issues/202):**
+  pursue a separate `src/` layout follow-up that preserves the four existing
+  public import packages. Scope includes package discovery, generated version
+  paths, coverage/docs configuration, resource paths, and verification of
+  editable installs, installed wheels, and wheels built from source
+  distributions. Consolidating the packages under one namespace is a separate,
+  unresolved API-design decision requiring an agreed structure and migration
+  policy for imports and saved objects; it is not implied by the layout move.
+- **[#203 — Plotting axes](https://github.com/NatLabRockies/solar-data-tools/issues/203):**
+  plan a follow-up PR building on completed DH-09. Add optional supplied axes
+  for single-panel plots and a documented axes collection for multi-panel
+  diagnostics, forwarding them through the handler and underlying renderers;
+  include the standalone `plot_heatmap`. Replace reliance on current-axis
+  state with explicit axes operations, define colorbar handling, and validate
+  panel counts and required projections. Preserve default plot behavior and
+  return conventions; caller-supplied figures retain caller control of sizing
+  and layout. Include composition examples and focused checks for supplied-axis
+  targeting, unchanged unrelated subplots, and no unintended new figures.
+  No numerical-analysis changes are part of this follow-up.
+- **[#218 — Pipeline prefilter](https://github.com/NatLabRockies/solar-data-tools/issues/218):**
+  defer implementation until daily-mask alignment, propagation into downstream
+  fits, and repeated-run/all-excluded behavior are specified. Distinguish
+  operational outages from observations excluded only from fitting. Coordinate
+  with LFA-05's fitting and loss-accounting contract, without adding the external
+  prefilter API to that item's current scope. Combining a mask with final quality
+  flags alone does not establish exclusion from upstream baseline fits.
+- **[#233 — Archival artifacts](https://github.com/NatLabRockies/solar-data-tools/issues/233),
+  existing [PR #236](https://github.com/NatLabRockies/solar-data-tools/pull/236):**
+  revisit the contributor's PR after cleanup. The maintainer will handle the
+  remaining touch-ups: add `prune archival` to `MANIFEST.in`, point the original
+  `tests/fixtures/README.md` to the archive, and update notebook-path comments
+  in `test_fit_tilt.py` and `test_fit_azimuth.py`. These are not additional work
+  requested from the contributor. Recheck the PR against its then-current base
+  before merging; no `.gitignore` change was identified in the bounded review.
+
+Issue [#235](https://github.com/NatLabRockies/solar-data-tools/issues/235) remains
+tracked within the current cleanup under TIME-02 and QUALITY-02; issue
+[#238](https://github.com/NatLabRockies/solar-data-tools/issues/238) remains under
+SD-07 and its SD-01 cross-reference. Neither is deferred by this section, and
+their recorded verification requirements remain unchanged.
 
 ### Latest completion status (2026-11-16)
 
