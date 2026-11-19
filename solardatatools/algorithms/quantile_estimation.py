@@ -11,12 +11,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from spcqe.quantiles import SmoothPeriodicQuantiles
+from solardatatools._units import POWER_TO_W, unit_scale
 from solardatatools.algorithms import Dilation
 from solardatatools.algorithms.dilation import undilate_quantiles
 from solardatatools.plotting import plot_bundt_cake
 
 
 class PVQuantiles:
+    """Fit PV power quantiles using daylight bounds on the corrected clock.
+
+    ``sig_original`` and ``quantiles_original`` use the regular sampling grid
+    on that clock. Observations retain their NaNs. Fitted quantiles can be
+    defined at those gaps.
+    """
+
     def __init__(
         self,
         data_handler,
@@ -46,6 +54,7 @@ class PVQuantiles:
         """
         dil = Dilation(data_handler, nvals_dil=nvals_dil)
         self.num_days = data_handler.num_days
+        self.power_units = data_handler.power_units
         self.dilation_object = dil
         self.sig_dilated = dil.signal_dil
         self.sig_original = dil.signal_ori
@@ -139,8 +148,15 @@ class PVQuantiles:
         plt.tight_layout()
         return plt.gcf()
 
-    def plot_quantile_bundt(self, quantile):
+    def plot_quantile_bundt(self, quantile, *, units=None):
+        """Plot a fitted quantile in kW by default, or in W if requested.
+
+        Custom input units are displayed on their original scale.
+        """
+        if units is None:
+            units = "kW" if self.power_units in POWER_TO_W else self.power_units
+        scale = unit_scale(self.power_units, units, POWER_TO_W)
         mat = self.quantiles_dilated[quantile]
         mat = mat[1:].reshape(-1, self.nvals_dil)[:365]
-        plot_bundt_cake(mat)
+        plot_bundt_cake(mat * scale, units=units)
         return plt.gcf()

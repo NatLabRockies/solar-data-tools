@@ -32,14 +32,26 @@ SDT algorithms. The defined signal decompositions are:
 from solardatatools._osd_signal_decompositions import (
     _osd_l2_l1d1_l2d2p365,
     _osd_tl1_l2d2p365,
-    _osd_l2_l1d2_constrained,
 )
 from solardatatools._cvx_signal_decompositions import (
     _cvx_l2_l1d1_l2d2p365,
     _cvx_l1_pwc_smoothper_trend,
     _cvx_tl1_l2d2p365,
-    _cvx_l2_l1d2_constrained,
 )
+from solardatatools._decomposition_result import DecompositionResult, SolveDiagnostics
+from solardatatools._l2_l1d2_constrained import (
+    _L2L1D2ConstrainedWorkspace,
+    _validate_signal,
+)
+
+__all__ = [
+    "DecompositionResult",
+    "SolveDiagnostics",
+    "l1_pwc_smoothper_trend",
+    "l2_l1d1_l2d2p365",
+    "l2_l1d2_constrained",
+    "tl1_l2d2p365",
+]
 
 
 def l2_l1d1_l2d2p365(
@@ -227,30 +239,47 @@ def l1_pwc_smoothper_trend(
 
 
 def l2_l1d2_constrained(
-    signal, w0=1, w1=5, return_all=False, solver="CLARABEL", verbose=False
-):
+    signal,
+    *,
+    w0=1,
+    w1=5,
+    use_ixs=None,
+    solver="CLARABEL",
+    solver_options=None,
+    verbose=False,
+) -> DecompositionResult:
+    """Fit a trend with endpoints fixed at zero and one.
+
+    Minimize the weighted sum of squared residuals and the weighted L1 norm
+    of the sample-index second difference. Both components span the input
+    grid. The consistency constraint applies at the admitted observations.
+    Off that set, the squared residual cost gives zero for positive w0,
+    and the returned result chooses zero when w0 is zero.
+
+    :param signal: Real one-dimensional signal with at least three entries.
+    :param w0: Nonnegative weight on the sum of squared residuals.
+    :param w1: Nonnegative weight on absolute second differences. It must be
+        positive if an interior sample is excluded. At least one weight must
+        be positive.
+    :param use_ixs: Optional Boolean mask. Only selected finite values enter
+        the consistency constraint.
+    :param solver: CVXPY solver name. CLARABEL is the default.
+    :param solver_options: Keyword arguments forwarded to CVXPY's solve method.
+        The default quadratic CLARABEL path adds ``ignore_dpp=True`` to avoid
+        a dense compilation intermediate. Explicit ``ignore_dpp``,
+        ``enforce_dpp=True``, or conic ``use_quad_obj=False`` choices are
+        preserved. Effective options are recorded in the diagnostics.
+    :param verbose: Enable solver output.
+    :returns: Named trend and residual components with an observation mask and
+        solve diagnostics. Components are unavailable when the fit fails.
     """
-    Used in solardatatools/algorithms/clipping.py
-
-    This is a convex problem and the default solver across SDT is CLARABEL.
-
-    :param signal: A 1d numpy array (must support boolean indexing) containing
-        the signal of interest
-    :param w0: Weight on the residual component
-    :param w1: The regularization parameter on l1d2 component
-    :param return_all: Returns all components and the objective value. Used for tests.
-    :param solver: Solver to use for the decomposition. Supported solvers are CLARABEL and MOSEK.
-    :param verbose: Sets verbosity
-    :return: A tuple with returning the signal, the l1d2 component estimate, and the weight
-    """
-    if solver == "MOSEK":
-        # MOSEK weights set in CVXPY function
-        res = _cvx_l2_l1d2_constrained(
-            signal, return_all=return_all, solver=solver, verbose=verbose
-        )
-    else:
-        res = _osd_l2_l1d2_constrained(
-            signal, w0=w0, w1=w1, return_all=return_all, solver=solver, verbose=verbose
-        )
-
-    return res
+    signal = _validate_signal(signal)
+    return _L2L1D2ConstrainedWorkspace(signal.size).solve(
+        signal,
+        w0=w0,
+        w1=w1,
+        use_ixs=use_ixs,
+        solver=solver,
+        solver_options=solver_options,
+        verbose=verbose,
+    )

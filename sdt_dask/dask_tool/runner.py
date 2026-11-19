@@ -7,12 +7,14 @@ See the README and tool_demo_SDTDask.ipynb for more information
 
 """
 
+import json
 import os
 import pandas as pd
 from dask import delayed
-from time import strftime
+from time import perf_counter, strftime
 from dask.distributed import performance_report
 from solardatatools import DataHandler
+from solardatatools._reporting import format_outcomes, pipeline_error
 
 
 class Runner:
@@ -70,6 +72,7 @@ class Runner:
             data_dict = {**key_dict, **errors}
             data_df = pd.DataFrame.from_dict(data_dict)
 
+            started = perf_counter()
             try:
                 # Reads CSV file and creates dataframe, Here the function reads
                 # data into pandas and python instead of using dask to store the
@@ -78,100 +81,88 @@ class Runner:
                 dh = DataHandler(df)
                 return (data_df, dh)
             except Exception as e:
-                data_df["get_data error"] = str(e)
+                data_df["get_data error"] = str(e) or type(e).__name__
+                data_df["stage outcomes"] = [
+                    {
+                        "data loading": {
+                            "status": "failed",
+                            "reason": str(e) or type(e).__name__,
+                            "elapsed seconds": perf_counter() - started,
+                        }
+                    }
+                ]
                 return (data_df,)
 
-        def run_pipeline(data_tuple, **kwargs):
-            """Function runs the pipeline and appends the results to the
-            dataframe. The function also stores the exceptions for the function
-            call into its respective errors
-
-            :param data_tuple: The tuple consists of the dataframe and datahandler
-            :type data_tuple: tuple
-            :param kwargs: The keyword arguments passed to the datahandler's
-                run_pipeline
-            :type kwargs: dict
-            :return: tuple containing key dataframe and datahandler
-            :rtype: tuple
-            """
-
-            # Assigns the dataframe, the first element of the tuple.
+        def run_pipeline(data_tuple, **options):
             data_df = data_tuple[0]
+            if len(data_tuple) == 1:
+                reason = "Unavailable because data loading failed."
+                for column in (
+                    "run_pipeline error",
+                    "run_pipeline_report error",
+                    "run_loss_analysis error",
+                    "run_loss_analysis_report error",
+                ):
+                    data_df[column] = reason
+                return data_tuple
 
-            # Change the errors if no datahandler is created
-            if data_df.iloc[0]["get_data error"] != "No error":
-                error = "get_data error lead to nothing"
-                data_df["run_pipeline error"] = error
-                data_df["run_pipeline_report error"] = error
-                data_df["run_loss_analysis error"] = error
-                data_df["run_loss_analysis_report error"] = error
-                return (data_df,)
-
-            # Calls datahndler's run_pipeline and handles errors
-            else:
-                datahandler = data_tuple[1]
-
-                try:
-                    datahandler.run_pipeline(**kwargs)
-                    if datahandler.num_days <= 365:
-                        data_df["run_loss_analysis error"] = (
-                            "The length of data is less than or equal to 1 year, loss analysis will fail thus is not performed."
-                        )
-                        data_df["run_loss_analysis_report error"] = (
-                            "Loss analysis is not performed"
-                        )
-
-                except Exception as e:
-                    data_df["run_pipeline error"] = str(e)
-                    error = "Failed because of run_pipeline error"
-                    data_df["run_loss_analysis error"] = error
-                    data_df["run_pipeline_report error"] = error
-                    data_df["run_loss_analysis_report error"] = error
-
-            # Gets the run_pipeline report and appends it to the dataframe as
-            # columns and handles errors
-            if data_df.iloc[0]["run_pipeline error"] == "No error":
-                try:
-                    report = datahandler.report(return_values=True, verbose=False)
-                    data_df = data_df.assign(**report)
-                except Exception as e:
-                    data_df["run_pipeline_report error"] = str(e)
-                    print(e)
-                # Gets the runtime for run_pipeline
-                try:
-                    data_df["runtimes"] = datahandler.total_time
-                except Exception as e:
-                    print(e)
-
-            return (data_df, datahandler)
+            datahandler = data_tuple[1]
+            try:
+                datahandler.run_pipeline(**options)
+            except Exception as error:
+                data_df["run_pipeline error"] = str(error) or type(error).__name__
+            return data_df, datahandler
 
         def run_loss_analysis(data_tuple):
-            """Runs the Loss analysis on the pipeline, handles errors and saves
-            the loss report results by appending it to the key dataframe. All
-            errors are assigned to the key dataframe in error reports.
-
-            :param data_tuple: A tuple containing the key dataframe and the
-                datahandler object.
-            :type data_tuple: tuple
-            :return: key dataframe with appended reports and assigned error values
-            :rtype: Pandas DataFrame
-            """
             data_df = data_tuple[0]
+            if len(data_tuple) == 1:
+                return data_df
 
-            if data_df.iloc[0]["run_loss_analysis error"] == "No error":
-                datahandler = data_tuple[1]
-                try:
-                    datahandler.run_loss_factor_analysis(verbose=True)
-                except Exception as e:
-                    data_df["run_loss_analysis error"] = str(e)
-                    error = "Failed because of run_loss_analysis error"
-                    data_df["run_loss_analysis_report error"] = error
-                try:
-                    loss_report = datahandler.loss_analysis.report()
-                    data_df = data_df.assign(**loss_report)
-                except Exception as e:
-                    data_df["run_loss_analysis_report error"] = str(e)
+            datahandler = data_tuple[1]
+            try:
+                report = datahandler.report(return_values=True, verbose=False)
+                outcomes = report.pop("stage outcomes")
+            except Exception as error:
+                data_df["run_pipeline_report error"] = str(error)
+                data_df["run_loss_analysis error"] = "Pipeline report unavailable."
+                data_df["run_loss_analysis_report error"] = "Loss analysis unavailable."
+                return data_df
 
+            data_df = data_df.assign(**report)
+            summary = pipeline_error(outcomes)
+            if summary != "No error":
+                data_df["run_pipeline error"] = summary
+            data_df["runtimes"] = datahandler.total_time
+
+            if datahandler.num_days is not None and datahandler.num_days <= 365:
+                outcomes["loss analysis"] = {
+                    "status": "skipped",
+                    "reason": "Dask loss analysis requires more than one year of data.",
+                    "elapsed seconds": 0.0,
+                }
+            else:
+                try:
+                    datahandler.run_loss_factor_analysis(verbose=False)
+                except Exception as error:
+                    data_df["run_loss_analysis error"] = (
+                        str(error) or type(error).__name__
+                    )
+                outcomes["loss analysis"] = datahandler.report(
+                    return_values=True, verbose=False
+                )["stage outcomes"]["loss analysis"]
+
+            loss = outcomes["loss analysis"]
+            if loss["status"] in {"failed", "skipped"}:
+                data_df["run_loss_analysis error"] = format_outcomes(
+                    {"loss analysis": loss}
+                )
+                data_df["run_loss_analysis_report error"] = "Loss analysis unavailable."
+            elif datahandler.loss_analysis is not None:
+                try:
+                    data_df = data_df.assign(**datahandler.loss_analysis.report())
+                except Exception as error:
+                    data_df["run_loss_analysis_report error"] = str(error)
+            data_df["stage outcomes"] = [outcomes]
             return data_df
 
         results = []
@@ -180,13 +171,10 @@ class Runner:
         # instead of a for loop **
         # Reference:
         #   https://docs.dask.org/en/latest/delayed-best-practices.html#avoid-too-many-tasks
+        options = {"fix_shifts": True, "verbose": False, **kwargs}
         for key in KEYS:
             data_tuple_0 = delayed(get_data)(key)
-            # data_tuple_0 = delayed(data_tuple_0)
-            data_tuple_1 = delayed(run_pipeline)(
-                data_tuple_0, fix_shifts=True, verbose=False
-            )
-            # data_tuple_1 = delayed(data_tuple_1)
+            data_tuple_1 = delayed(run_pipeline)(data_tuple_0, **options)
 
             result_df = delayed(run_loss_analysis)(data_tuple_1)
             results.append(result_df)
@@ -211,6 +199,16 @@ class Runner:
         ):
             summary_table = self.client.compute(self.df_results)
             df = summary_table.result()
+            if "stage outcomes" in df:
+                df = df.assign(
+                    **{
+                        "stage outcomes": df["stage outcomes"].map(
+                            lambda outcomes: json.dumps(outcomes)
+                            if isinstance(outcomes, dict)
+                            else None
+                        )
+                    }
+                )
             df.to_csv(self.output_path + "/" + f"{time_stamp}-" + summary_report)
 
         self.client.shutdown()

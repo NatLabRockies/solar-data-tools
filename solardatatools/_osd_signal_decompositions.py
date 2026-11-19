@@ -18,11 +18,6 @@ the OSD modeling language. The defined signal decompositions are:
     - `l1d1`: piecewise constant heuristic, l1-norm of first order differences
     - `l2d2p365`: small second order diffs (smooth) and 365-periodic
 
-4. `_osd_l2_l1d2_constrained`:
-    - `l2`: gaussian noise, sum-of-squares small or l2-norm squared
-    - `l1d2`: piecewise linear heuristic
-    - constrained to have first val at 0 and last val at 1
-
 """
 
 import numpy as np
@@ -38,7 +33,6 @@ from gfosd.components import (
     Periodic,
     Inequality,
     FirstValEqual,
-    LastValEqual,
     NoCurvature,
     Fourier,
     Basis,
@@ -252,37 +246,3 @@ def _osd_l1_l1d1_l2d2p365(
         return s_hat, s_seas, s_lin, problem
 
     return s_hat, s_seas, s_lin
-
-
-def _osd_l2_l1d2_constrained(
-    signal, w0=1, w1=5, return_all=False, solver="OSQP", verbose=False
-):
-    """
-    Used in solardatatools/algorithms/clipping.py
-
-    This is a convex problem and the default solver across SDT is OSQP.
-
-    :param signal: A 1d numpy array (must support boolean indexing) containing
-        the signal of interest
-    :param w0: Weight on the residual component
-    :param w1: The regularization parameter on l1d2 component
-    :param return_all: Returns all components and the objective value. Used for tests.
-    :param solver: Solver to use for the decomposition
-    :param verbose: Sets verbosity
-    :return: A tuple with returning the signal, the l1d2 component estimate,
-        and the weight
-    """
-    c1 = SumSquare(weight=w0)
-    c2 = Aggregate([SumAbs(weight=w1, diff=2), FirstValEqual(0), LastValEqual(1)])
-
-    classes = [c1, c2]
-
-    problem = Problem(signal, classes)
-    problem.decompose(solver=solver, verbose=verbose, eps_rel=1e-6, eps_abs=1e-6)
-
-    s_hat = problem.decomposition[1]
-
-    if return_all:
-        return s_hat, problem
-
-    return signal, s_hat, w1

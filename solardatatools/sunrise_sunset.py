@@ -10,8 +10,7 @@ from solardatatools.signal_decompositions import tl1_l2d2p365
 
 def rise_set_rough(bool_msk):
     nvals = bool_msk.shape[0]
-    num_meas_per_hour = nvals / 24
-    hour_of_day = np.arange(0, 24, 1.0 / num_meas_per_hour)
+    hour_of_day = 24 * np.arange(nvals) / nvals
     sunrise_idxs = np.argmax(bool_msk, axis=0)
     sunset_idxs = nvals - np.argmax(np.flip(bool_msk, axis=0), axis=0) - 1
     sunrises = np.nan * np.ones_like(sunrise_idxs)

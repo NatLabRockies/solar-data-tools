@@ -10,14 +10,18 @@ class TestStandardizeTimeAxis(unittest.TestCase):
         filepath = Path(__file__).parent.parent
         data_file_path = filepath / "fixtures" / "data_transforms" / "timeseries.csv"
         data = pd.read_csv(data_file_path, index_col=0, parse_dates=True)
-        expected_data_file_path = (
-            filepath / "fixtures" / "data_transforms" / "timeseries_standardized.csv"
+        expected_index = pd.date_range(
+            data.index.min().normalize(),
+            data.index.max().normalize() + pd.Timedelta(days=1),
+            freq="5min",
+            inclusive="left",
         )
-        expected_output = pd.read_csv(
-            expected_data_file_path, index_col=0, parse_dates=True
-        )
+        # The acquisition timestamps already lie on the five-minute grid.
+        expected_output = data.reindex(expected_index)
         actual_output, _ = standardize_time_axis(data, timeindex=True)
-        np.testing.assert_array_almost_equal(expected_output, actual_output)
+        pd.testing.assert_frame_equal(
+            expected_output, actual_output, check_index_type=False
+        )
 
 
 class TestMake2D(unittest.TestCase):

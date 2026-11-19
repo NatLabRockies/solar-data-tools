@@ -39,7 +39,7 @@ This module contains tests for the following signal decompositions:
     - test_cvx_l1_l1d1_l2d2p365_default
     - test_cvx_l1_l1d1_l2d2p365_idx_select
 
-4) '_cvx_l2_l1d2_constrained':
+4) Public 'l2_l1d2_constrained', compared to the legacy MOSEK fixture at w1=10:
 
     TESTS
     -----
@@ -53,6 +53,7 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error as mae
 
 from solardatatools import _cvx_signal_decompositions as sd
+from solardatatools.signal_decompositions import l2_l1d2_constrained
 
 
 class TestSignalDecompositions(unittest.TestCase):
@@ -635,9 +636,10 @@ class TestSignalDecompositions(unittest.TestCase):
         expected_obj_val = output["expected_obj_val_mosek"]
 
         # Run test with default args
-        actual_y_hat, actual_obj_val = sd._cvx_l2_l1d2_constrained(
-            signal, w1=1e1, solver=self.cvxpy_solver, return_all=True
-        )
+        result = l2_l1d2_constrained(signal, w1=10)
+        self.assertTrue(result.has_fit, result.diagnostics)
+        actual_y_hat = result.components["trend"]
+        actual_obj_val = result.diagnostics.objective_value
 
         mae_y_hat = mae(actual_y_hat, expected_y_hat)
 

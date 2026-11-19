@@ -9,6 +9,13 @@ a matrix
 import numpy as np
 import pandas as pd
 
+from solardatatools._time_grid import (
+    calendar_grid,
+    resolve_cadence,
+    samples_per_day,
+    wall_clock_index,
+)
+
 
 def find_start_end(arr):
     n = len(arr)
@@ -25,45 +32,54 @@ def find_start_end(arr):
 
 
 def make_2d(
-    df, key="dc_power", trim_start=False, trim_end=False, return_day_axis=False
+    df,
+    key="dc_power",
+    trim_start=False,
+    trim_end=False,
+    return_day_axis=False,
+    *,
+    sampling_interval=None,
 ):
-    """
-    This function constructs a 2D array (or matrix) from a time series signal with a standardized time axis. The data is
-    chunked into days, and each consecutive day becomes a column of the matrix.
+    """Embed aligned observations in dated columns on a fixed daily grid.
 
-    :param df: A pandas data frame contained tabular data with a standardized time axis.
-    :param key: The key corresponding to the column in the data frame contained the signal to make into a matrix
-    :return: A 2D numpy array with shape (measurements per day, days in data set)
+    Missing slots and partial days are padded with NaN. Use
+    `standardize_time_axis` first if the timestamps need snapping. An explicit
+    fixed `sampling_interval` can identify the grid when observations are sparse.
+    The trim flags drop the first or last day. Fully missing edge days are
+    removed for the selected column.
     """
-    if df is not None:
-        days = df.resample("D").first().index
-        try:
-            n_steps = int(24 * 60 * 60 / df.index.to_series().diff().median().seconds)
-        except AttributeError:
-            # No frequency defined for index. Attempt to infer
-            freq_ns = np.median(df.index[1:] - df.index[:-1])
-            freq_delta_seconds = int(freq_ns / np.timedelta64(1, "s"))
-            n_steps = int(24 * 60 * 60 / freq_delta_seconds)
-        if not trim_start:
-            start = days[0].strftime("%Y-%m-%d")
-        else:
-            start = days[1].strftime("%Y-%m-%d")
-        if not trim_end:
-            end = days[-1].strftime("%Y-%m-%d")
-        else:
-            end = days[-2].strftime("%Y-%m-%d")
-        D = np.copy(df[key].loc[start:end].values.reshape(n_steps, -1, order="F"))
-        # Trim leading or trailing missing days, which can occur when data frame
-        # contains data from multiple sources or sensors that have missing
-        # values at different times.
-        empty_days = np.all(np.isnan(D), axis=0)
-        i, j = find_start_end(empty_days)
-        D = D[:, i:j]
-        day_axis = pd.date_range(start=start, end=end, freq="1D")
-        day_axis = day_axis[i:j]
-        if return_day_axis:
-            return D, day_axis
-        else:
-            return D
-    else:
-        return
+    if df is None:
+        return None
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("make_2d requires a DatetimeIndex.")
+    index = wall_clock_index(df.index)
+    if (
+        index.empty
+        or index.hasnans
+        or not index.is_unique
+        or not index.is_monotonic_increasing
+    ):
+        raise ValueError(
+            "make_2d requires increasing, distinct timestamps. Use standardize_time_axis first."
+        )
+    interval = resolve_cadence(index, sampling_interval)
+    if np.any(index.astype("datetime64[ns]").asi8 % interval.value):
+        raise ValueError(
+            "make_2d requires midnight-aligned timestamps. Use standardize_time_axis first."
+        )
+
+    grid = calendar_grid(index[0], index[-1], interval)
+    rows = samples_per_day(interval)
+    day_axis = grid[::rows]
+    matrix = (
+        df[key].set_axis(index).reindex(grid).to_numpy().reshape(rows, -1, order="F")
+    )
+    trim = slice(int(trim_start), -1 if trim_end else None)
+    matrix = matrix[:, trim]
+    day_axis = day_axis[trim]
+    empty_days = pd.isna(matrix).all(axis=0)
+    first, last = find_start_end(empty_days) if np.any(~empty_days) else (0, 0)
+    matrix = matrix[:, first:last].copy()
+    if return_day_axis:
+        return matrix, day_axis[first:last]
+    return matrix

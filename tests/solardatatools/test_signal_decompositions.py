@@ -558,15 +558,15 @@ class TestSignalDecompositions(unittest.TestCase):
         expected_obj_val = output["expected_obj_val"]
 
         # Run test with default args
-        actual_y_hat, actual_problem = sd.l2_l1d2_constrained(
-            signal, w1=5, solver=self.solver_convex, return_all=True
-        )
-        actual_obj_val = actual_problem.objective_value
+        result = sd.l2_l1d2_constrained(signal)
+        self.assertTrue(result.has_fit, result.diagnostics)
+        actual_y_hat = result.components["trend"]
+        actual_obj_val = result.diagnostics.objective_value
 
         mae_y_hat = mae(actual_y_hat, expected_y_hat)
 
         self.assertLess(mae_y_hat, self.mae_threshold)
-        self.assertAlmostEqual(expected_obj_val, actual_obj_val, self.obj_tolerance)
+        self.assertAlmostEqual(expected_obj_val, actual_obj_val, places=5)
 
 
 if __name__ == "__main__":
