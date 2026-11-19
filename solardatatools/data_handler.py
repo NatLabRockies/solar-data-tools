@@ -952,13 +952,17 @@ class DataHandler:
             )
         return report if return_values else None
 
-    def fix_dst(self):
-        """
-        Helper function for fixing data sets with known DST shift. This function
-        works for data recorded anywhere in the United States. The choice of
-        timezone (e.g. 'US/Pacific') does not matter, as long as the dates
-        of the clock changes are the same.
-        :return:
+    def fix_dst(self) -> bool:
+        """Convert known DST-affected timestamps to local standard time.
+
+        This method assumes naive timestamps that follow the US Pacific
+        daylight saving transition schedule. Ambiguous and nonexistent
+        timestamps are dropped.
+
+        :return: ``True`` if this call shifted timestamps or removed rows.
+            Return ``False`` if the input was unchanged or correction had
+            already run. The result reports a change to the input during
+            this call. Call this method when the input is known to use DST.
         """
         if not self.__fix_dst_ran:
             df = self.data_frame_raw
@@ -968,12 +972,13 @@ class DataHandler:
             df_localized = df_localized[df_localized.index == df_localized.index]
             df_localized = df_localized.tz_convert("Etc/GMT+8")
             df_localized = df_localized.tz_localize(None)
+            changed = not df.index.equals(df_localized.index)
             self.data_frame_raw = df_localized
             self.__fix_dst_ran = True
-            return
+            return changed
         else:
             print("DST correction already performed on this data set.")
-            return
+            return False
 
     def run_loss_factor_analysis(
         self,

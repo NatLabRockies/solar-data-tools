@@ -35,12 +35,18 @@ Then we can create a DataHandler object with this DataFrame:
 dh = DataHandler(df)
 ```
 
-If you know that your data is affected by daylight savings, you can run the following method to correct
-for it:
+If you know your timestamps follow the US daylight saving schedule used by
+`US/Pacific`, call `fix_dst()` to convert them to local standard time:
 
 ```python
-dh.fix_dst()
+changed = dh.fix_dst()
 ```
+
+`changed` is `True` if this call shifted any timestamps or removed any rows
+with ambiguous or nonexistent timestamps. It is `False` when the call leaves
+the input unchanged, including when correction already ran. Use the return
+value to report what changed during preprocessing. Call the method only when
+you already know the timestamps are affected by daylight saving time.
 
 The DataHandler object is now ready to be used for data processing and analysis.
 

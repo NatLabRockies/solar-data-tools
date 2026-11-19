@@ -132,12 +132,13 @@ def test_raw_matrix_rerun_uses_original_input():
 
 
 def test_explicit_dst_correction_survives_a_rerun(source, capsys):
-    handler = DataHandler(source)
-    handler.fix_dst()
+    summer = source.shift(freq=pd.DateOffset(months=6))
+    handler = DataHandler(summer)
+    assert handler.fix_dst() is True
     corrected = handler.data_frame_raw.copy()
     handler.run_pipeline(verbose=False)
     handler.run_pipeline(verbose=False, reset=False)
-    handler.fix_dst()
+    assert handler.fix_dst() is False
     pd.testing.assert_frame_equal(handler.data_frame_raw, corrected)
     assert "already performed" in capsys.readouterr().out
 

@@ -3,7 +3,61 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import pytest
 from solardatatools import DataHandler
+
+
+@pytest.mark.parametrize(
+    ("timestamps", "expected_timestamps", "retained", "changed"),
+    [
+        (["2024-01-15 12:00"], ["2024-01-15 12:00"], [0], False),
+        (["2024-07-15 12:00"], ["2024-07-15 11:00"], [0], True),
+        (
+            ["2024-03-10 01:30", "2024-03-10 02:30", "2024-03-10 03:30"],
+            ["2024-03-10 01:30", "2024-03-10 02:30"],
+            [0, 2],
+            True,
+        ),
+        (["2024-11-03 01:30", "2024-11-03 02:30"], ["2024-11-03 02:30"], [1], True),
+    ],
+    ids=["winter", "summer", "spring-gap", "fall-overlap-removal-only"],
+)
+def test_fix_dst_reports_per_call_changes(
+    timestamps, expected_timestamps, retained, changed, capsys
+):
+    index = pd.DatetimeIndex(timestamps, name="time")
+    source = pd.DataFrame({"power": np.arange(len(index))}, index=index)
+    handler = DataHandler(source)
+    expected = handler.data_frame_raw.iloc[retained].set_axis(
+        pd.DatetimeIndex(expected_timestamps, name="time")
+    )
+
+    assert handler.fix_dst() is changed
+    pd.testing.assert_frame_equal(handler.data_frame_raw, expected)
+    assert capsys.readouterr().out == ""
+
+    assert handler.fix_dst() is False
+    assert "already performed" in capsys.readouterr().out
+    pd.testing.assert_frame_equal(handler.data_frame_raw, expected)
+
+
+def test_fix_dst_propagates_failure_and_can_retry(monkeypatch):
+    index = pd.DatetimeIndex(["2024-07-15 12:00"])
+    handler = DataHandler(pd.DataFrame({"power": [10]}, index=index))
+    before = handler.data_frame_raw.copy()
+
+    def fail_conversion(*args, **kwargs):
+        raise RuntimeError("test DST conversion failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pd.DataFrame, "tz_convert", fail_conversion)
+        with pytest.raises(RuntimeError, match="test DST conversion failure"):
+            handler.fix_dst()
+    pd.testing.assert_frame_equal(handler.data_frame_raw, before)
+
+    assert handler.fix_dst() is True
+    expected = before.set_axis(pd.DatetimeIndex(["2024-07-15 11:00"]))
+    pd.testing.assert_frame_equal(handler.data_frame_raw, expected)
 
 
 class TestDataHandler(unittest.TestCase):

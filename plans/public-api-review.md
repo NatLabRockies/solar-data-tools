@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-17, SD-07 scoped workaround implemented and verified; DH-10 DST change reporting planned
+- Last revised: 2026-11-18, DH-10 opened and implemented
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -94,31 +94,31 @@ tracked within the current cleanup under TIME-02 and QUALITY-02; issue
 SD-07 and its SD-01 cross-reference. Neither is deferred by this section, and
 their recorded verification requirements remain unchanged.
 
-### Latest completion status (2026-11-17)
+### Latest completion status (2026-11-18)
 
-The most recent source checkpoint is committed in `574b6ab`: the native
-`l2_l1d2_constrained` filter, named result and diagnostics, reusable clipping
-workspace, caller migration, and associated tests/documentation. This completes
-the first bounded SD-01 checkpoint and CLIP-01's stale-fit correction, not the
-whole native-decomposition migration. The final corrected checkpoint's
-recorded verification is 121 base tests passed with two skips; independent
-review passed 52 focused tests with one skip, eight additional numerical cases,
-and the exact rebuilt wheel's isolated smoke check. Those checks were not rerun
-for this plan update. CLIP-02's
-false-positive investigation remains open. SD-07's first bounded memory
-verification is now recorded below: numerical checks pass, but first
-compilation still requests a quadratic-size dense parameter-coefficient array.
-The subsequent canonicalization/version comparison recommends retaining the
-quadratic path with `ignore_dpp=True` for this filter's default CLARABEL path;
-it removes the observed allocation while passing the fixed numerical checks.
-Conic execution failed the agreed numerical checks at 1,000 points and hit the
-memory stop during 5,000-point compilation in CVXPY 1.8.1. The scoped workaround
-is now implemented and locally verified; independent public-tool review and owner
-acceptance are required for its handoff. Other native models, upstream repair,
-and released-code mitigation remain open under SD-07.
-The subsequent commit `8d2dc04` records the reviewed SD-07 proposal only; it
-implements no memory mitigation. QUALITY-02 below is newly planned work.
-Section 9 retains the preceding completed pipeline, grid, and CI checkpoints.
+The most recent source checkpoint is committed in `f6560a4`: the bounded SD-07
+workaround for the native constrained filter and clipping caller. The default
+quadratic CLARABEL path uses `ignore_dpp=True`, preserves explicit caller
+compilation choices, and reports effective options. The owner accepted the
+clean checkpoint and confirmed the commit. All six committed files match the
+independently reviewed checkpoint hashes.
+
+Recorded verification is 134 tests passed with two skips on Python 3.13.11 /
+CVXPY 1.8.1; all 27 focused tests also passed under each of CVXPY 1.7.5,
+1.8.2, and 1.9.3. Independent public-tool review returned no findings on its
+first pass, ran 50 tests with one skip, and passed the installed-wheel smoke
+with verified wheel/source agreement. The commit-message/file-summary exchange
+also completed. These checks were not rerun for this completion-record update.
+Section 9 and SD-07 retain the detailed evidence and limitations.
+
+The preceding `574b6ab` completed the first bounded SD-01 filter/clipping
+checkpoint and CLIP-01's stale-fit correction. Other native models, upstream
+sparse coefficient extraction, released-gfosd mitigation, and CLIP-02 remain
+open. The SD-07 modeling/measurement requirements carry into subsequent native
+checkpoints; the completed workaround does not close that broader scope.
+DH-10 is open. Its per-call `fix_dst()` return value is implemented in the
+worktree for owner review. QUALITY-02 remains planned within the cleanup scope.
+Section 9 retains earlier pipeline, grid, and CI completions.
 
 ### Decision-pass status and remaining specifications (2026-11-11)
 
@@ -639,17 +639,17 @@ implementation requests.
 
 #### DH-10 — Report whether explicit DST correction changed the input [API enhancement]
 
-- **Status and scope, 2026-11-17:** planned within the current cleanup PR #237,
+- **Status and scope, 2026-11-18:** opened and implemented within cleanup PR #237,
   following [discussion #216](https://github.com/NatLabRockies/solar-data-tools/discussions/216).
   This bounded item covers `DataHandler.fix_dst()` only; it is not one of the
   deferred post-cleanup follow-ups above.
 - **Location:** `solardatatools/data_handler.py`, `DataHandler.fix_dst`.
-- **Observed behavior:** every successful call currently returns `None`, both
+- **Previous behavior:** every successful call returned `None`, both
   when timestamps or rows change and when the operation leaves data unchanged.
   The private already-run flag records execution, not whether data changed.
   Bounded checks confirmed unchanged winter-only input, shifted summer input,
   removal of ambiguous/nonexistent transition rows, and unchanged repeat calls.
-- **Planned contract:** return a Python `bool` indicating whether this call
+- **Contract:** return a Python `bool` indicating whether this call
   changed the stored input data. For the existing correction, determine that
   from the original and corrected timestamp indexes, including removed rows.
   Return `True` for shifted timestamps or removed rows and `False` for an
@@ -669,14 +669,14 @@ implementation requests.
   flag differs from a per-call mutation result, and the latter already returns
   a DataFrame in its default mode. Other correction methods require separately
   agreed return contracts.
-- **Proposed verification:** assert Boolean type and values for winter-only,
+- **Verification cases:** assert Boolean type and values for winter-only,
   summer, spring-gap, fall-overlap, and repeated-call inputs; verify corrected
   timestamps, retained values, and removed rows against existing behavior.
   Include failure propagation without setting the successful-run guard and
   retain the existing pipeline-rerun regression. No numerical solves are needed
   for the focused return-value cases.
-- **Authorization:** add this item to the current plan and draft the discussion
-  response. Implementation and its tests are not performed by this plan update.
+- **Authorization:** the owner opened DH-10 on November 18. The implementation
+  and local verification are recorded in Section 9.
 
 ### `solardatatools/time_axis_manipulation.py`
 
@@ -1870,16 +1870,16 @@ with no usable candidate is a numerical failure, not a no-change finding.
 
 #### SD-07 — Preserve sparse structure through quadratic modeling and compilation [performance defect and verification proposal]
 
-- **Status, 2026-11-17:** the first bounded verification and the subsequent
-  owner-authorized canonicalization/version comparison are complete. The
-  unchanged quadratic DPP path still requests a quadratic-size dense array.
-  The additional quadratic `ignore_dpp=True` comparison passes the agreed
-  checks and removes the observed conversion. The owner-approved scoped default
-  is now implemented and locally verified, with effective options reported and
-  explicit caller choices preserved. Conic results include numerical failures
-  and a resource stop. Independent public-tool review and owner acceptance are
-  required for the bounded checkpoint. Other models, upstream sparse extraction,
-  and released-code mitigation remain open. Dependency declarations are unchanged.
+- **Status, 2026-11-18:** the bounded native-filter/clipping workaround is
+  complete in `f6560a4`, following a clean first-pass public-tool review and
+  owner acceptance. The committed files match the reviewed checkpoint hashes.
+  The earlier verification and canonicalization/version comparison established
+  the rationale: the quadratic DPP path requests a quadratic-size dense array;
+  `ignore_dpp=True` removes the observed conversion and passes the agreed checks.
+  The scoped default preserves explicit caller choices and reports effective
+  options. Conic results include numerical failures and a resource stop.
+  Other models, upstream sparse extraction, and released-code mitigation remain
+  open. Dependency declarations are unchanged; this is a bounded completion.
 - **Initial protocol:** use fresh, sequential subprocesses at 200, 1,000,
   and 5,000 grid points for the native filter. Exercise the public clipping
   path at its actual 5,000-point CDF resolution, including repeated fits.
@@ -5973,6 +5973,59 @@ register.
   that harness failure. Evidence is retained under the local visualization
   artifact root in `sd07-implementation-20261117/`.
 - **Review gate:** `sdt-review` is the independent reviewer for the authorized
-  public-tool loop; its explicit result and file summary belong in the owner
-  handoff. This record does not claim a clean review or owner acceptance before
-  those steps occur. No staging or commit is authorized by the review loop.
+  public-tool loop. It returned no findings on the first pass and completed
+  the commit-message/file-summary exchange for the unchanged checkpoint.
+  Independent verification passed 50 tests with one skip and the installed-wheel
+  smoke; the reviewer verified wheel/source byte agreement, the wheel hash,
+  all six checkpoint hashes, and `git diff --check`. It inspected the retained
+  comparison and per-version test evidence without rerunning the full study or
+  the other three version suites. The loop performed no staging or commit;
+  subsequent owner acceptance and commit are recorded below.
+
+### 2026-11-18 — SD-07 workaround completion recorded
+
+- **Owner direction:** the owner accepted the clean checkpoint, confirmed the
+  commit, and requested this completion record plus a next-task recommendation.
+- **Completion:** `f6560a43f77dee75f479b5db7c118ae29fd56d97` commits the
+  scoped native constrained-filter/clipping workaround, option-precedence and
+  allocation regressions, diagnostics/documentation, installed-wheel assertion,
+  and preceding SD-07 evidence/decision records. All six committed files match
+  the independent review's checkpoint hashes; the worktree was clean before
+  this plan-only update.
+- **Verification and review:** the recorded builder result is 134 passed with
+  two skips, with 27 focused tests passing under each additional CVXPY version
+  1.7.5/1.8.2/1.9.3. `sdt-review` returned an explicit first-pass clean result
+  under the public-tool register, independently passed 50 tests with one skip,
+  and passed the installed-wheel smoke with verified source/wheel agreement.
+  The required commit-message and file-summary handoff completed. Existing
+  MOSEK, native Python 3.10, fresh dependency-resolution, and benchmark-replication
+  limitations remain; no tests or numerical experiments were rerun here.
+- **Remaining SD-07 scope:** apply sparse-modeling and bounded verification
+  requirements to subsequent native migrations. Upstream sparse coefficient
+  extraction and mitigation for released gfosd remain separate open work;
+  explicit DPP/conic choices retain their documented tradeoffs. This entry
+  completes the accepted workaround, not every item under SD-07 or SD-01.
+- **Next recommended task:** open DH-10's specified `DataHandler.fix_dst()`
+  Boolean return contract. It is a small independent public-API change with
+  focused timestamp/row-preservation and repeat/failure checks, and requires
+  no numerical fitting. The larger native time-shift/capacity checkpoints still
+  need their coordinated SD-03/SD-04/SD-05/selection specifications. This
+  recommendation does not authorize DH-10 implementation. No source files,
+  tests, or other issue scopes are changed by this completion record.
+
+### 2026-11-18 — DH-10 opened and implemented
+
+- **Owner direction:** open DH-10 following the SD-07 workaround checkpoint.
+- **Implementation:** `DataHandler.fix_dst()` compares the timestamp indexes
+  before and after its existing correction and returns a Python Boolean.
+  Shifted timestamps or removed rows give `True`. Unchanged inputs and repeat
+  calls give `False`. A successful first call sets the repeat guard even if
+  the index stays the same. A conversion failure propagates before either the
+  stored input or guard is updated. The method docstring and user guide describe
+  the per-call result.
+- **Verification:** regressions cover winter and summer timestamps, a spring gap,
+  row removal alone during the fall overlap, repeat calls, and propagation of a
+  conversion error followed by a successful retry. The pipeline rerun regression
+  verifies that an actual summer timestamp correction survives both runs.
+  The local suite passed 139 tests with two skips. Ruff and `git diff --check`
+  passed. The implementation is in the worktree for owner review.
