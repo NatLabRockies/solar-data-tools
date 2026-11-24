@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-23, QUALITY-02 implementation checkpoint
+- Last revised: 2026-11-24, QUALITY-02 completion and QUALITY-03/QUALITY-01 checkpoint
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -94,12 +94,19 @@ tracked within the current cleanup under TIME-02 and QUALITY-02; issue
 SD-07 and its SD-01 cross-reference. Neither is deferred by this section, and
 their recorded verification requirements remain unchanged.
 
-### Latest completion status (2026-11-18)
+### Latest completion status (2026-11-24)
 
-The most recent source checkpoint is committed in `f6560a4`: the bounded SD-07
-workaround for the native constrained filter and clipping caller. The default
-quadratic CLARABEL path uses `ignore_dpp=True`, preserves explicit caller
-compilation choices, and reports effective options. The owner accepted the
+QUALITY-02 is complete on `cleanup` in `8bdae17`. The committed diff and
+new regression test file match the independently reviewed hashes. The
+review recorded 152 tests passed, two skipped, and all 98 Oahu
+day-and-cadence cases passing the new linearity check. The original data
+from the reporter in #235 remains unavailable. QUALITY-03 tracks the
+historical modal scorer's sensitivity to input units. See Section 9.
+
+The bounded SD-07 workaround for the native constrained filter and clipping
+caller was committed in `f6560a4`. The default quadratic CLARABEL path uses
+`ignore_dpp=True`, preserves explicit caller compilation choices, and reports
+effective options. The owner accepted the
 clean checkpoint and confirmed the commit. All six committed files match the
 independently reviewed checkpoint hashes.
 
@@ -116,10 +123,7 @@ checkpoint and CLIP-01's stale-fit correction. Other native models, upstream
 sparse coefficient extraction, released-gfosd mitigation, and CLIP-02 remain
 open. The SD-07 modeling/measurement requirements carry into subsequent native
 checkpoints; the completed workaround does not close that broader scope.
-DH-10 is complete in `6f266cc` after clean public-tool review. QUALITY-02 is
-open for the high-frequency linearity rejection reported in #235. The Oahu
-one-second run reproduced rejection of all seven days. QUALITY-03 tracks the
-separate unit effect on linearity scores and sample flags.
+DH-10 is complete in `6f266cc` after clean public-tool review.
 Section 9 retains earlier pipeline, grid, and CI completions.
 
 ### Decision-pass status and remaining specifications (2026-11-11)
@@ -934,40 +938,39 @@ the other physical-time conversions; no duplicate correction is intended here.
 
 #### QUALITY-01 — The default dataset score is not the documented passing fraction [P2]
 
-- **Location:** `dataset_quality_score`, approximately lines 113–130;
-  `make_density_scores`, approximately lines 29–53.
+- **Status, 2026-11-24:** implemented in the working tree for review.
+- **Location:** `dataset_quality_score` and `make_density_scores`.
 - **Finding:** with `good_days=None` and the default `use_advanced=True`, the
-  function averages continuous density-to-baseline ratios. Its docstring instead
-  specifies the fraction of days passing the missing-data test, bounded by zero
-  and one. Those ratios are not Boolean decisions and are not bounded by one.
+  previous function averaged continuous density-to-baseline ratios, which can
+  exceed one. Its docstring specified the fraction of days passing the
+  missing-data test.
 - **Owner decision, 2026-10-22:** use the documented fraction of days passing
-  the missing-data/density checks. Retain continuous density ratios as daily
-  diagnostics, not as the aggregate quality score.
-- **Proposed correction:** for $N>0$ days and Boolean pass indicators $g_t$,
-  return $N^{-1}\sum_{t=1}^N g_t$. Use the same aggregation for the default,
-  simple, and supplied-`good_days` paths; validate the supplied daily mask.
-  For the advanced path, apply an explicit density acceptance rule before
-  averaging. Reuse the existing density-flag criteria as the proposed default
-  (currently $0.6<\mathrm{density\_score}<1.05$), rather than introduce another
-  classification rule. Distinguish these acceptance thresholds from the
-  existing `threshold=0.2`: in the simple path it classifies daily density,
-  whereas in `make_density_scores` it selects observations for fitting the
-  density baseline. Document that distinction and the migration of any renamed
-  arguments. Specify unavailable-day and failed-score handling without silently
-  treating a failed computation as a valid passing fraction.
-  `DataHandler.score_data_set` already averages Boolean `no_errors` flags;
-  retain that separate overall-quality definition, which also incorporates
-  other quality checks. The standalone density-based score need not equal it.
-- **Proposed verification:** distinguish continuous ratios from pass indicators
-  using analytically specified cases; check default, simple, and supplied-mask
-  paths against their documented semantics, including out-of-range ratios and
-  unavailable days. Clipping a continuous mean to $[0,1]$ does not make it a
-  fraction of passing days.
+  the density check. `make_density_scores` provides continuous daily ratios.
+- **Owner decision, 2026-11-24:** count unavailable days as failures and
+  include them in the total number of days. Raise an error for an empty
+  matrix or an advanced score without eligible baseline days or a usable fit.
+  Use CLARABEL for both `dataset_quality_score` and `make_density_scores`
+  when no solver is supplied. Both use the existing Fourier density model.
+- **Implementation:** for $N>0$ days and Boolean pass indicators $g_t$,
+  return $N^{-1}\sum_{t=1}^N g_t$ in all three call paths. The default check
+  uses the existing strict density bounds of 0.6 and 1.05. In this mode,
+  `threshold=0.2` selects the days used to fit the baseline. The simple mode
+  applies `threshold` directly to each day's density. A supplied `good_days`
+  argument must be a one-dimensional Boolean mask with one entry per day.
+  Masked decisions count as failures. Both density paths use finite power
+  observations for capacity and density calculations. The two advanced
+  entry points share a baseline fit that excludes days with no finite readings.
+  `DataHandler.score_data_set` averages `no_errors` flags, which combine
+  density and linearity.
+- **Verification:** analytical tests exercise both strict bounds,
+  out-of-range ratios, unavailable days, simple thresholds, mask validation,
+  and fit failures. A synthetic case exercises the default baseline fit
+  through both density entry points.
 
 #### QUALITY-02 — Linearity screening rejects one-second data [P2]
 
-- **Status, 2026-11-23:** the nonzero-slope rule is implemented in the
-  checkout and under independent review. All 98 recorded Oahu
+- **Status, 2026-11-24:** complete on `cleanup` in `8bdae17` after independent
+  review. The review recorded 152 tests passed and two skipped. All 98 Oahu
   day-and-cadence scores passed the default linearity cutoff. The reporter's
   case remains open. See Section 9 for the diagnosis, data, and verification.
 - **Public report:** [issue #235](https://github.com/NatLabRockies/solar-data-tools/issues/235)
@@ -999,17 +1002,22 @@ the other physical-time conversions; no duplicate correction is intended here.
   Review the results before selecting a change to the scoring rule.
 - **Stopping rule.** Stop after two weeks if the second week supports the explanation from the first and the detector still identifies deliberate interpolation in the known-gap check. Expand the study only to answer a specific unresolved question. Multi-year runtime is a separate performance question.
 
-#### QUALITY-03 — Equivalent power units can change linearity scores and flags [P2]
+#### QUALITY-03 — Equivalent power units can change historical linearity scores and flags [P2]
 
-- **Status, 2026-11-19:** open as a separate issue found during source review.
-- **Finding:** `make_linearity_scores` rounds adjacent differences to four
-  decimal places in the input units. A step of `0.0001` in kW corresponds to
-  `0.1` W, so unit conversion can change which differences count as repeats.
-  On the same filled Oahu trace, W/m² and kW/m² gave different scores and
-  differed at 431 sample labels. See the paired baseline in Section 9.
-- **Verification target:** at fixed cadence, equivalent physical inputs and
-  capacities expressed in W and kW should produce equivalent linearity scores,
-  identical sample masks, and identical day decisions.
+- **Disposition, 2026-11-24:** preserve the historical three-argument modal
+  scorer for reproducibility. Document its unit dependence in the API
+  reference and user guide, and direct users to the straight-ramp scorer
+  with `sampling_interval` and `daylight_mask`.
+- **Finding:** the modal scorer rounds adjacent differences to four decimal
+  places in the input units. A step of `0.0001` in kW corresponds to `0.1` W,
+  so unit conversion can change which differences count as repeats. On the
+  same filled Oahu trace, W/m² and kW/m² gave different scores and differed at
+  431 sample labels. See the paired baseline in Section 9.
+- **Verification:** the production straight-ramp scorer gave identical
+  one-second scores and masks in W/m² and kW/m² in both Oahu weeks. The
+  focused regression suite checks equivalent W and kW inputs and preserves
+  a fixture for the historical call. The compatibility disposition requires
+  no further Oahu study.
 
 ### `solardatatools/sensor_identification.py`
 
@@ -6214,3 +6222,39 @@ register.
   disjoint ramps, flat fills, minimum duration and interior counts, and the
   provisional daylight mask. The preexisting modal score fixture still
   exercises the historical three-argument call.
+
+### 2026-11-24 — QUALITY-02 completion
+
+- **Completion:** the owner confirmed commit `8bdae17` on `cleanup` and a
+  clean working tree. The committed diff and new regression test file match
+  the independently reviewed hashes. The review recorded 152 tests passed,
+  two skipped, and all 98 Oahu day-and-cadence cases passing the new check.
+
+### 2026-11-24 — QUALITY-03 compatibility disposition
+
+- **Compatibility:** keep the three-argument modal scorer for reproducibility
+  and document that converting units can change its scores and sample mask.
+  Recommend the production straight-ramp call for direct users.
+- **Evidence:** the one-second W/m² and kW/m² comparisons in both recorded
+  Oahu weeks agreed for the production scorer. Its synthetic W/kW comparison
+  and the historical compatibility fixture provide regression coverage.
+
+### 2026-11-24 — QUALITY-01 density scoring checkpoint
+
+- **Aggregation:** count passing density flags over all day columns. The
+  advanced check uses the existing strict acceptance bounds. The simple
+  check uses the caller's daily density threshold, and a supplied Boolean
+  mask provides the pass decisions directly.
+- **Unavailable data:** an unavailable day contributes to the denominator
+  as a failure. An empty matrix or an advanced score without eligible days
+  or a usable fit raises an error. Solver exceptions propagate.
+- **Default fit:** the new end-to-end test exposed `solver=None` reaching
+  gfosd and raising before fitting. The owner approved CLARABEL as the
+  shared default for both density entry points. The existing Fourier fit
+  and explicit solver options remain available.
+- **Verification:** 166 tests passed and two skipped in the full suite on
+  Python 3.13 with CVXPY 1.8.1 for the first checkpoint. Independent review
+  reproduced three edge cases involving baseline fit eligibility, nonfinite
+  readings, and masked decisions. The revision adds regressions for all three.
+  The full suite for the revised checkpoint passed with 171 tests and two
+  skips in the same environment.

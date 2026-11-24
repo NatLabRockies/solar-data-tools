@@ -11,16 +11,23 @@ from solardatatools._time_grid import fixed_duration
 from solardatatools.signal_decompositions import tl1_l2d2p365
 
 
+_DENSITY_LOWER_THRESHOLD = 0.6
+_DENSITY_UPPER_THRESHOLD = 1.05
+
+
+def _density_flags(density_scores, lower, upper):
+    return np.logical_and(density_scores > lower, density_scores < upper)
+
+
 def make_quality_flags(
     density_scores,
     linearity_scores,
-    density_lower_threshold=0.6,
-    density_upper_threshold=1.05,
+    density_lower_threshold=_DENSITY_LOWER_THRESHOLD,
+    density_upper_threshold=_DENSITY_UPPER_THRESHOLD,
     linearity_threshold=0.1,
 ):
-    density_flags = np.logical_and(
-        density_scores > density_lower_threshold,
-        density_scores < density_upper_threshold,
+    density_flags = _density_flags(
+        density_scores, density_lower_threshold, density_upper_threshold
     )
     linearity_flags = linearity_scores < linearity_threshold
     return density_flags, linearity_flags
@@ -33,14 +40,14 @@ def make_density_scores(
     return_fit=False,
     solver=None,
 ):
-    nans = np.isnan(data_matrix)
-    capacity_est = np.quantile(data_matrix[~nans], 0.95)
-    data_copy = np.copy(data_matrix)
-    data_copy[nans] = 0.0
-    foo = data_copy > 0.02 * capacity_est
-    density_signal = np.sum(foo, axis=0) / data_matrix.shape[0]
-    use_days = np.logical_and(density_signal > threshold, density_signal < 0.8)
-    fit_signal = tl1_l2d2p365(density_signal, use_ixs=use_days, tau=0.85, solver=solver)
+    """Return continuous daily density ratios, using CLARABEL by default.
+
+    Estimate capacity from finite power observations and fit the density
+    baseline using only days with finite observations and eligible density.
+    """
+    density_signal, fit_signal, _ = _fit_density_baseline(
+        data_matrix, threshold, solver
+    )
     scores = density_signal / fit_signal
     out = [scores]
     if return_density_signal:
@@ -52,6 +59,33 @@ def make_density_scores(
     else:
         out = tuple(out)
     return out
+
+
+def _fit_density_baseline(data_matrix, threshold, solver):
+    density_signal, observed_days = _daily_density(data_matrix, capacity_fraction=0.02)
+    if not observed_days.any():
+        raise ValueError("No observations for fitting the density baseline.")
+    use_days = observed_days & (density_signal > threshold) & (density_signal < 0.8)
+    if not use_days.any():
+        raise ValueError("No eligible days for fitting the density baseline.")
+    if solver is None:
+        solver = "CLARABEL"
+    fit_signal = tl1_l2d2p365(density_signal, use_ixs=use_days, tau=0.85, solver=solver)
+    if fit_signal is None:
+        raise ValueError("The density baseline fit returned no result.")
+    return density_signal, fit_signal, observed_days
+
+
+def _daily_density(data_matrix, capacity_fraction):
+    finite = np.isfinite(data_matrix)
+    observed_days = finite.any(axis=0)
+    if not observed_days.any():
+        return np.zeros(data_matrix.shape[1]), observed_days
+
+    capacity_est = np.quantile(data_matrix[finite], 0.95)
+    above_power_threshold = finite & (data_matrix > capacity_fraction * capacity_est)
+    density_signal = above_power_threshold.sum(axis=0) / data_matrix.shape[0]
+    return density_signal, observed_days
 
 
 def make_linearity_scores(
@@ -78,8 +112,13 @@ def make_linearity_scores(
     slots. Days without daylight, and matrices without a positive finite
     capacity estimate, have unavailable (NaN) scores.
 
-    Calls with only the original three arguments retain the historical modal
-    difference score and mask. The density baseline is used for those calls.
+    Use the straight-ramp scorer by supplying ``sampling_interval`` and
+    ``daylight_mask``. Express the data and capacity in the same units.
+
+    The historical three-argument call with ``density_baseline`` is available
+    for reproducing earlier results. It rounds adjacent differences to four
+    decimal places in the input units, so unit conversions can change both
+    its daily scores and its sample mask.
     """
     if (
         sampling_interval is None
@@ -169,45 +208,70 @@ def daily_missing_data_simple(data_matrix, threshold=0.2, return_density_signal=
     """
     This function takes a PV power data matrix and returns a boolean array,
     identifying good days. The good days are the ones that are not missing a
-    significant amount of data. This assessment is made based on the fraction
-    of non-zero and non-NaN values each day. In a typical "good" data set,
-    around 40-60% of the measured values each day will be non-zero. The default
-    threshold for this function is 20%.
+    significant amount of data. This assessment uses the fraction of each
+    day's slots that contain finite values above 0.5% of estimated capacity.
+    In a typical good data set, around 40-60% of the measured values each day
+    will be nonzero. The default daily density threshold is 20%.
 
     :param data_matrix: numpy.array, a matrix containing PV power signals
     :param threshold: float, the threshold to identify good days
     :return: a boolean array, with a True if the day passes the test and a
         False if the day fails
     """
-    nans = np.isnan(data_matrix)
-    capacity_est = np.quantile(data_matrix[~nans], 0.95)
-    data_copy = np.copy(data_matrix)
-    data_copy[nans] = 0.0
-    foo = data_copy > 0.005 * capacity_est
-    bar = np.sum(foo, axis=0) / data_matrix.shape[0]
-    good_days = bar > threshold
+    density_signal, observed_days = _daily_density(data_matrix, capacity_fraction=0.005)
+    good_days = observed_days & (density_signal > threshold)
     if return_density_signal:
-        return good_days, bar
-    else:
-        return good_days
+        return good_days, density_signal
+    return good_days
 
 
 def dataset_quality_score(
     data_matrix, threshold=0.2, good_days=None, use_advanced=True
 ):
-    """
-    This function scores a complete data set. The score is the fraction of days
-    in the data set that pass the missing data test. A score of 1 means all the
-    days in the data set pass the test and are not missing data.
+    """Return the fraction of days passing the missing-data density check.
 
-    :param data_matrix: numpy.array, a matrix containing PV power signals
-    :param threshold: float, the threshold to identify good days
-    :return: the score, a float between 0 and 1
+    The default check passes days whose density-to-baseline ratio is strictly
+    between 0.6 and 1.05. In that mode, ``threshold`` selects days for fitting
+    the baseline with CLARABEL. With ``use_advanced=False``, a day passes
+    when its simple density exceeds ``threshold``. A day without finite power
+    observations counts as failing.
+
+    Supply a one-dimensional Boolean ``good_days`` mask with one entry per
+    column to use caller-provided decisions directly. Masked entries in a
+    NumPy masked Boolean array count as failures. Every column contributes to
+    the denominator in all three modes.
+
+    ``data_matrix`` must have at least one sample row and one day column.
+    An empty matrix, invalid mask, or unusable advanced fit raises ``ValueError``.
+    Exceptions from the baseline solver propagate to the caller.
     """
-    if good_days is None:
-        if use_advanced:
-            good_days = make_density_scores(data_matrix, threshold=threshold)
-        else:
-            good_days = daily_missing_data_simple(data_matrix, threshold=threshold)
-    score = np.sum(good_days) / data_matrix.shape[1]
-    return score
+    data_matrix = np.asarray(data_matrix)
+    if data_matrix.ndim != 2 or not data_matrix.size:
+        raise ValueError(
+            "data_matrix must be two-dimensional with at least one row and one column."
+        )
+
+    if good_days is not None:
+        good_days = np.ma.asarray(good_days)
+        if good_days.dtype != bool or good_days.shape != (data_matrix.shape[1],):
+            raise ValueError("good_days must be a Boolean mask with one entry per day.")
+        good_days = good_days.filled(False)
+    elif use_advanced:
+        good_days = _advanced_density_flags(data_matrix, threshold)
+    else:
+        good_days = daily_missing_data_simple(data_matrix, threshold)
+
+    return float(good_days.mean())
+
+
+def _advanced_density_flags(data_matrix, threshold):
+    density_signal, fit, observed_days = _fit_density_baseline(
+        data_matrix, threshold, solver=None
+    )
+    usable = observed_days & np.isfinite(fit) & (fit > 0)
+    scores = np.full_like(density_signal, np.nan)
+    with np.errstate(over="ignore"):
+        np.divide(density_signal, fit, out=scores, where=usable)
+    if not np.isfinite(scores).any():
+        raise ValueError("The density baseline fit returned no usable daily scores.")
+    return _density_flags(scores, _DENSITY_LOWER_THRESHOLD, _DENSITY_UPPER_THRESHOLD)
