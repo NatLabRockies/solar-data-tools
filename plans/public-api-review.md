@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-18, DH-10 opened and implemented
+- Last revised: 2026-11-23, QUALITY-02 implementation checkpoint
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -116,8 +116,10 @@ checkpoint and CLIP-01's stale-fit correction. Other native models, upstream
 sparse coefficient extraction, released-gfosd mitigation, and CLIP-02 remain
 open. The SD-07 modeling/measurement requirements carry into subsequent native
 checkpoints; the completed workaround does not close that broader scope.
-DH-10 is open. Its per-call `fix_dst()` return value is implemented in the
-worktree for owner review. QUALITY-02 remains planned within the cleanup scope.
+DH-10 is complete in `6f266cc` after clean public-tool review. QUALITY-02 is
+open for the high-frequency linearity rejection reported in #235. The Oahu
+one-second run reproduced rejection of all seven days. QUALITY-03 tracks the
+separate unit effect on linearity scores and sample flags.
 Section 9 retains earlier pipeline, grid, and CI completions.
 
 ### Decision-pass status and remaining specifications (2026-11-11)
@@ -639,7 +641,7 @@ implementation requests.
 
 #### DH-10 — Report whether explicit DST correction changed the input [API enhancement]
 
-- **Status and scope, 2026-11-18:** opened and implemented within cleanup PR #237,
+- **Status and scope, 2026-11-18:** complete in `6f266cc` within cleanup PR #237,
   following [discussion #216](https://github.com/NatLabRockies/solar-data-tools/discussions/216).
   This bounded item covers `DataHandler.fix_dst()` only; it is not one of the
   deferred post-cleanup follow-ups above.
@@ -962,54 +964,52 @@ the other physical-time conversions; no duplicate correction is intended here.
   unavailable days. Clipping a continuous mean to $[0,1]$ does not make it a
   fraction of passing days.
 
-#### QUALITY-02 — Linearity screening depends on cadence and power units [P2]
+#### QUALITY-02 — Linearity screening rejects one-second data [P2]
 
-- **Locations:** `data_quality.py`, `make_linearity_scores` and
-  `make_quality_flags`; `DataHandler.get_linearity_scores` and downstream
-  `no_errors` day selection.
+- **Status, 2026-11-23:** the nonzero-slope rule is implemented in the
+  checkout and under independent review. All 98 recorded Oahu
+  day-and-cadence scores passed the default linearity cutoff. The reporter's
+  case remains open. See Section 9 for the diagnosis, data, and verification.
 - **Public report:** [issue #235](https://github.com/NatLabRockies/solar-data-tools/issues/235)
-  reports rejection of all days by the linearity screen for one-second data
-  after bypassing the former cadence-rounding error. The two coordinate bugs
-  in that report are covered by completed TIME-02 work. Address the remaining
-  screening behavior and its validation within PR #237; keep the issue open
-  until the remaining work has been verified.
-- **Source-confirmed finding:** `make_linearity_scores` rounds adjacent raw
-  power differences to four decimal places before finding their mode. Capacity
-  sets the low-power exclusion, but does not normalize these differences, and
-  the sampling interval is not used. Thus the rounding tolerance has different
-  physical meaning for W and kW. For a smooth power signal,
-  $p(t+\Delta)-p(t)\approx p'(t)\Delta$; reducing $\Delta$ makes increments
-  smaller relative to the fixed rounding bins and can increase the modal
-  fraction without indicating interpolation. Sensor quantization can also
-  produce repeated increments. This is a plausible explanation for the report,
-  not a reproduced diagnosis of the reporter's data.
-- **Proposed correction and specification checkpoint:** define the physical
-  quantity and tolerance used to detect suspicious linear interpolation,
-  accounting for cadence, power scaling, and measurement quantization. Require
-  equivalent physical inputs in W and kW to yield equivalent scores and flags,
-  including the reported infill mask. Decide the normalization and acceptance
-  rule from the validation below before adopting a replacement. Dividing by
-  cadence alone does not establish discrimination between interpolation,
-  legitimate smooth production, and quantization. Do not resolve the report by
-  merely relaxing the threshold, silently resampling, or imposing an
-  unsupported blanket one-minute minimum. Preserve the distinction between
-  measured observations, pipeline-filled samples, and inferred infill labels.
-- **Proposed verification:** compare equivalent W/kW inputs; include smooth
-  physical signals, quantized observations, and deliberately interpolated
-  intervals at one-second, ten-second, one-minute, and representative coarser
-  cadences. Use bounded synthetic cases and representative observed records,
-  including the reporter's data if available. Check scores, flags, infill-mask
-  localization, and downstream day eligibility through the public pipeline.
-  Distinguish cadence effects from changes in noise and information caused by
-  aggregation; do not require identical scores for all resampled records.
-  Establish useful detection and false-rejection behavior before documenting
-  the supported operating range. Existing grid tests establish coordinate
-  handling, not scientific validation of high-frequency quality screening.
-- **Related and sequencing:** TIME-02 establishes the exact grid; DH-03
-  establishes explicit units. QUALITY-02 follows those contracts and is
-  separate from QUALITY-01's aggregate passing-fraction correction. No
-  screening implementation or numerical experiment is authorized by this
-  plan update; implementation still requires issue-specific direction.
+  describes widespread linearity flags on one-second data after the reporter
+  bypassed cadence rounding. TIME-02 covers the time-axis failures in the same
+  report. The issue gives neither the input data nor a full pipeline call.
+- **Scoring input:** keep using the filled power matrix, including samples
+  inserted by SDT interpolation.
+- **Selected rule (owner decision, 2026-11-20):** retain the nonzero-slope
+  straight-ramp scorer. A ramp needs two anchors at least 30 seconds apart
+  and at least two interior samples. Mark the eligible interior samples and
+  score their combined share of estimated daylight, counting each slot
+  once. Equal-anchor interpolation produces a flat fill and receives no
+  flags from this check. A gap that crosses the 0.5%-of-capacity gate can
+  be flagged over only part of its length.
+- **Test budget (owner decision, 2026-11-20).** Use two seven-day windows at one-second cadence, or 1,209,600 grid slots in total. Use the existing July 25–31, 2010 Oahu AP3 window for diagnosis. Reserve the second week to check the explanation and any proposed scoring change.
+- **Choice of second week.** Prefer a week from the reporter’s logger if available. Otherwise, choose a nonoverlapping Oahu AP3 week with a different mix of clear and variable days. Record the source and dates before changing the scoring rule. Examine its linearity results only after formulating the explanation or candidate fix on the first week.
+- **Second week:** January 15–21, 2011 HST, Oahu AP3. Selected using nearby
+  one-minute irradiance variability and added to the notebook after the
+  July straight-ramp trials.
+- **Oahu cadence checks (owner decision, 2026-11-20):** average the observed
+  AP3 readings in W/m² over nonoverlapping intervals aligned to midnight.
+  Use 1, 5, 10, 30, 60, 120, and 300 seconds. Run `DataHandler.run_pipeline`
+  separately at each cadence, with its own capacity estimate, filling, density
+  fit, linearity scores, and day flags. For each cadence, report the modal
+  change, exact repeats, nonzero changes rounded to zero, and the elapsed
+  lengths of consecutive modal pairs alongside the day flags. Check the
+  response to a known daylight gap that SDT fills in a copy of a day.
+  Review the results before selecting a change to the scoring rule.
+- **Stopping rule.** Stop after two weeks if the second week supports the explanation from the first and the detector still identifies deliberate interpolation in the known-gap check. Expand the study only to answer a specific unresolved question. Multi-year runtime is a separate performance question.
+
+#### QUALITY-03 — Equivalent power units can change linearity scores and flags [P2]
+
+- **Status, 2026-11-19:** open as a separate issue found during source review.
+- **Finding:** `make_linearity_scores` rounds adjacent differences to four
+  decimal places in the input units. A step of `0.0001` in kW corresponds to
+  `0.1` W, so unit conversion can change which differences count as repeats.
+  On the same filled Oahu trace, W/m² and kW/m² gave different scores and
+  differed at 431 sample labels. See the paired baseline in Section 9.
+- **Verification target:** at fixed cadence, equivalent physical inputs and
+  capacities expressed in W and kW should produce equivalent linearity scores,
+  identical sample masks, and identical day decisions.
 
 ### `solardatatools/sensor_identification.py`
 
@@ -6028,4 +6028,189 @@ register.
   conversion error followed by a successful retry. The pipeline rerun regression
   verifies that an actual summer timestamp correction survives both runs.
   The local suite passed 139 tests with two skips. Ruff and `git diff --check`
-  passed. The implementation is in the worktree for owner review.
+  passed.
+- **Independent review and completion:** `sdt-review` returned no findings
+  under the public-tool register, independently passed 20 focused tests, and
+  verified the five file hashes and full diff hash. The owner accepted the
+  reviewed change and committed it as `6f266cc`. These tests were not rerun to
+  record completion.
+
+### 2026-11-19 — Oahu baseline for QUALITY-02 and QUALITY-03
+
+- **Input:** the owner approved the [Oahu Solar Measurement Grid](https://data.nlr.gov/submissions/11)
+  as an independent measured input for [issue #235](https://github.com/NatLabRockies/solar-data-tools/issues/235).
+  The fixed window was AP3 global horizontal irradiance (field 17, instrument
+  211), July 25–31, 2010, in Hawaii Standard Time. The July ZIP and study files
+  are local under the ignored `studies/quality-02-oahu/` directory. The
+  reporter's original input was unavailable.
+- **Method:** at `6f266cc`, run `DataHandler.run_pipeline` with a one-second
+  grid and default filling and scoring. Use the original values in W/m² and
+  divide by 1,000 for kW/m². The input floor is −5 W/m² in both runs. The
+  86,400-by-7 filled matrices agreed after rescaling to within
+  `1.14e-13 W/m²`. Timestamp rejection and collision counts were zero.
+  Rescoring the W/m² filled matrix divided by 1,000, with the same density
+  fit and a scaled capacity estimate, exactly matched the kW/m² pipeline's
+  scores, linearity decisions, and sample mask.
+- **High-frequency rejection (QUALITY-02):** all seven days passed density
+  and failed linearity at the default 0.1 cutoff in both units. The input had
+  zero missing slots within estimated daylight on all seven days. Daily
+  scoring and flagging completed. Downstream capacity-change fitting failed
+  in both runs with zero usable days. In the study notebook, the most common
+  rounded change was zero on every day. On July 27, 23,170 of the 23,184 pairs
+  counted as zero in W/m² were exact repeats of recorded values. This describes
+  the observed failure on Oahu. The dependence on cadence and the cause of
+  the reporter's exact case remain open.
+- **Unit sensitivity (QUALITY-03):** scores ranged from 0.2633 to 0.5145 in
+  W/m² and from 0.2649 to 0.5181 in kW/m². The largest paired difference was
+  0.00357. Of 604,800 sample slots, the inferred infill masks flagged 149,370
+  in W/m² and 149,801 in kW/m², differing at 431 slots. Both runs made the
+  same daily quality decisions.
+- **Reproduction:** run `PYTHONPATH=. python -u studies/quality-02-oahu/baseline.py
+  --output studies/quality-02-oahu/baseline.json` from the checkout root with
+  the project environment active. For a fresh rerun, choose a new output
+  filename. The study README records the download URL, checksum, and full
+  command. Two successful runs gave identical daily results. The JSON and
+  `baseline.masks.npz` retain the daily results and sample masks. Production
+  source was untouched.
+
+### 2026-11-20 — QUALITY-02 July diagnosis and held-out week
+
+- **Cadence:** the [Oahu marimo notebook](../studies/quality-02-oahu/oahu_linearity.py)
+  runs the pipeline on midnight-aligned averages of the July AP3 observations
+  at 1, 5, 10, 30, 60, 120, and 300 seconds. Each run estimates capacity,
+  fills missing samples, and computes density and linearity at that cadence.
+  This supersedes the earlier comparisons with the one-second fit held fixed.
+  All seven days passed density at every cadence. Zero passed linearity at
+  one second, five passed with 5-second averages, and all passed at each
+  tested cadence from 10 seconds through 5 minutes. At 5 minutes, the scores
+  ranged from about 0.00665 to 0.00673 against the 0.1 cutoff. Filling,
+  daily scoring, and flagging succeeded at every cadence. The downstream
+  clipping stage emitted a solver accuracy warning at 10 seconds.
+- **Cause on Oahu:** across all seven days, 112,389 of the 112,435 one-second
+  pairs at the zero mode were exact repeats. Rounding nonzero changes to zero
+  accounted for the other 46. For the 10:00 HST five-minute gap on July 27,
+  SDT filled all 300 removed samples and the scorer flagged zero of them. The
+  day still failed with 29,693 flags outside the gap. A complete smooth
+  synthetic day passed, and rounding the same trace to whole W/m² caused it
+  to fail. A 90-minute gap in the smooth synthetic trace made its fill slope
+  the mode and all 5,400 inserted samples were flagged. With the same gap in
+  the quantized version, zero stayed the mode and zero inserted samples were
+  flagged. The notebook shows the gap locations, scores, and masks at each
+  tested duration.
+- **Ramp duration sensitivity:** the notebook tests exact interpolation
+  with a floating-point tolerance. For July 27 at one second, a 30-second
+  minimum anchor span recovers both the 30-second and 5-minute gaps, for
+  0.777% of daylight flagged with zero samples flagged outside the gaps.
+  A 1-minute minimum keeps the 5-minute gap. At 5-minute cadence, a gap
+  of two samples qualifies through a 15-minute anchor span. In the synthetic
+  hourly case, the two-hour gap qualifies through a three-hour anchor span
+  and contributes 16.67% of the 12-hour daylight window. Requiring two
+  interior samples excludes the single-sample gap at both coarse cadences.
+- **Initial seven-day trial at 30 seconds:** run the one-second pipeline on the
+  recorded week and on a copy with 30 seconds removed at 10:05 and
+  5 minutes removed at 14:00 HST each day. Score each run's filled trace
+  using its estimated daylight duration. The exact-ramp prototype flagged
+  zero samples as recorded and all 2,310 inserted samples across the 14
+  gaps, with zero flags elsewhere. Daylight scores with gaps ranged from
+  0.776% to 0.818%. The denominator included the gaps. The July 27 result
+  was 330 flagged seconds out of 42,476 daylight seconds (0.7769%).
+- **Sampled July outages:** use four seeded draws each for one, two, and
+  three outages per day, for 84 modified days. Sample nonoverlapping
+  daylight gaps with lengths from 15 seconds to 90 minutes. Run the
+  one-second pipeline on each modified input and score flagged seconds as a
+  percentage of the run's estimated daylight seconds, including the gaps.
+  The prototype recovered all 148 gaps of 30 seconds or longer, skipped all
+  20 gaps of 15 seconds, and flagged zero recorded or outside-gap samples.
+  Scores exceeded the proposed 10% cutoff in 21 trials and reached 25.43%.
+  The estimated daylight duration changed by at most 39 seconds. Using the
+  recorded daylight durations gives the same cutoff decisions. The
+  notebook shows the sampled scores and the seconds behind each fraction.
+- **Straight-ramp scores by cadence:** repeat the original recorded-week
+  sweep with the 30-second minimum span and two-interior-sample rule, using
+  each run's filled power matrix, capacity, and daylight estimate. Of the
+  49 day-cadence scores, 46 were zero. The three nonzero scores were 25
+  flagged seconds on July 29 at 5 seconds and 20 flagged seconds each on
+  July 28 and 30 at 10 seconds. The maximum was 0.0598% of daylight. All 49
+  scores were below the proposed 10% cutoff.
+- **Paired scorer views:** use one method selector for the recorded-day
+  and gap-test sections. Both views compare the sample masks on the same
+  filled trace. The cadence plot reports flagged daylight time divided by
+  estimated daylight time for either method. The current SDT native
+  day score is available in the diagnostics. Both methods use the same
+  84 sampled July outage trials.
+- **January source:** [Oahu Solar Measurement Grid](https://data.nlr.gov/submissions/11),
+  AP3 GHI (field 17, instrument 211), January 15–21, 2011 HST. The
+  [January archive](https://midcdmz.nlr.gov/oahu_archive/rawdata/Oahu_GHI/201101.zip)
+  is stored as `studies/quality-02-oahu/downloads/201101.zip` with SHA-256
+  `ee9113d74b28f2e4185b25e65f396c81324cefe480bf5eec6eb4a2740238e89a`.
+  All seven files have 54,001 consecutive AP3 readings from 05:00:00 to
+  20:00:00 HST, with no missing values or values below the study's −5 W/m²
+  floor. See the study README for the variability screen.
+- **Two-week notebook:** process each contiguous week independently at every
+  cadence and concatenate the daily outputs for display. The selectors cover
+  all 14 dates. The sampled-gap comparison contains 168 modified days per
+  method. The July unit baseline and sampled-gap results were reproduced
+  after adding the January data.
+- **January gap recovery with the nonzero-slope rule:** four fills had
+  equal measured anchors and the straight-ramp scorer skipped
+  them. Four other fills crossed the 0.5%-of-capacity gate. Samples below
+  the gate break the candidate ramp. Only eligible interior samples are
+  flagged. All eight affected trials kept their 10% daily decision.
+
+  | January date | Outages | Draw | Start (HST) | Removed (s) | Flagged (s) | Limiting condition |
+  | --- | ---: | ---: | --- | ---: | ---: | --- |
+  | 15 | 2 | 2 | 17:59:19 | 900 | 803 | Capacity gate |
+  | 16 | 3 | 4 | 16:45:28 | 5,400 | 5,234 | Capacity gate |
+  | 18 | 3 | 3 | 16:11:38 | 30 | 0 | Equal anchors |
+  | 19 | 2 | 3 | 07:41:41 | 60 | 0 | Equal anchors |
+  | 20 | 1 | 2 | 17:18:54 | 3,600 | 3,575 | Capacity gate |
+  | 20 | 3 | 2 | 12:17:29 | 30 | 0 | Equal anchors |
+  | 21 | 1 | 3 | 17:26:29 | 60 | 0 | Equal anchors |
+  | 21 | 3 | 1 | 18:08:48 | 900 | 540 | Capacity gate |
+
+  The flat-inclusive comparison recovered the four equal-anchor fills.
+  It also put two recorded January days over the 10% cutoff at one second
+  and one recorded January day over the cutoff at five seconds. The
+  nonzero-slope scorer kept all recorded day-cadence scores below 0.06%.
+  A filled trace alone leaves the origin of a flat segment ambiguous. The
+  owner selected the nonzero-slope rule for implementation and retained
+  flat inclusion as a notebook comparison.
+- **Notebook comparator:** the historical three-argument scoring call
+  supplies the modal-difference reference. The study keeps the reference
+  pipeline scores and eligibility in a separate table, with each method's
+  own score and linearity decision in the comparison.
+
+### 2026-11-23 — QUALITY-02 source implementation and verification
+
+- **Pipeline:** score the filled matrix against the provisional daylight
+  estimate already used for filling. The score divides the number of
+  flagged ramp interiors by the number of daylight samples. The infill
+  and denominator masks use the observation clock. Daily flagging still
+  uses the default 10% cutoff. Days without a score fail the linearity
+  check and are omitted from quality clustering.
+- **Recorded Oahu data:** the production mask matched the study detector
+  with either provisional or final daylight on all 98 day-and-cadence
+  combinations. Production scores peaked at 0.059916% in July and
+  0.048031% in January. W/m² and kW/m² gave identical scores and flags at
+  one second in both weeks.
+- **Gap replay:** ran the first seeded two-outage draw of each week through
+  the production pipeline at one second. Each run flagged 20,910 of 20,925
+  removed seconds, with no flags outside the gaps. Each missed one
+  15-second outage and put one day at or above the 10% cutoff.
+- **Review follow-up:** SDT interpolates lower-precision floating-point
+  observations in double precision. The filled matrix retains the resulting
+  straight ramps, and the raw matrix preserves the stored readings. A paired
+  test with six 15-minute gaps on the same one-second readings recovered all
+  5,400 seconds and gave the same daily decision in both precisions.
+  The detector also uses at least double precision. On a fully observed
+  piecewise-linear day with values representable in both precisions,
+  changing the stored dtype or the interpolation option left the score and
+  masks identical. Rounding before SDT receives the data can obscure a
+  ramp's exact shape.
+  Unavailable days leave clustering thresholds and labels for scored days
+  unchanged. A call to the linearity getter after failed filling preserves
+  the failed stage and unset scores.
+- **Regression suite:** 152 passed and 2 skipped. Tests cover scores across
+  disjoint ramps, flat fills, minimum duration and interior counts, and the
+  provisional daylight mask. The preexisting modal score fixture still
+  exercises the historical three-argument call.

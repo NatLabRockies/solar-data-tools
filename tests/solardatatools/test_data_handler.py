@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import pytest
 from solardatatools import DataHandler
+from solardatatools.data_quality import make_linearity_scores
 
 
 @pytest.mark.parametrize(
@@ -123,9 +124,23 @@ class TestDataHandler(unittest.TestCase):
         scores_path = filepath / "fixtures" / "scoring" / "linearity.csv"
         with open(scores_path) as file:
             expected_scores = np.loadtxt(file, delimiter=",")
-        np.testing.assert_allclose(
-            dh.daily_scores.linearity, expected_scores, atol=2e-2
+        legacy_scores, _ = make_linearity_scores(
+            dh.filled_data_matrix,
+            dh.capacity_estimate,
+            dh.daily_signals.seasonal_density_fit,
         )
+        np.testing.assert_allclose(legacy_scores, expected_scores, atol=2e-2)
+        infill = dh.boolean_masks.infill
+        scoring_daylight = dh.boolean_masks.linearity_daylight
+        self.assertFalse(np.any(infill & ~scoring_daylight))
+        np.testing.assert_allclose(
+            dh.daily_scores.linearity,
+            infill.sum(axis=0) / scoring_daylight.sum(axis=0),
+        )
+        # The first day has a two-sample gap between observed 5-minute anchors.
+        np.testing.assert_array_equal(infill[107:111, 0], [False, True, True, False])
+        self.assertFalse(dh.daily_flags.linearity[0])
+        self.assertTrue(dh.daily_flags.linearity[1:].all())
         scores_path = filepath / "fixtures" / "scoring" / "quality_clustering.csv"
         with open(scores_path) as file:
             expected_scores = np.loadtxt(file, delimiter=",")

@@ -7,6 +7,7 @@ This module contains functions for identifying corrupt or bad quality data.
 
 import numpy as np
 from scipy.stats import mode
+from solardatatools._time_grid import fixed_duration
 from solardatatools.signal_decompositions import tl1_l2d2p365
 
 
@@ -53,7 +54,88 @@ def make_density_scores(
     return out
 
 
-def make_linearity_scores(data_matrix, capacity, density_baseline):
+def make_linearity_scores(
+    data_matrix,
+    capacity,
+    density_baseline=None,
+    *,
+    sampling_interval=None,
+    daylight_mask=None,
+):
+    """Return the flagged fraction of daylight and the sample-level infill mask.
+
+    Each column of the filled data matrix is a day on a fixed-step grid.
+    Supply a sampling interval with units, such as "1s", and a Boolean
+    daylight mask of the same shape. Candidate ramps stay in daylight at or
+    above 0.5% of capacity. They must have nonzero slope, span at least 30
+    seconds, and contain at least two interior samples. Straightness is checked
+    against the line through the endpoints using at least double precision.
+    Interpolation between equal anchors produces a flat segment and receives
+    no flags.
+
+    The sample mask marks only ramp interiors, regardless of the daily
+    rejection threshold. The denominator includes all estimated daylight
+    slots. Days without daylight, and matrices without a positive finite
+    capacity estimate, have unavailable (NaN) scores.
+
+    Calls with only the original three arguments retain the historical modal
+    difference score and mask. The density baseline is used for those calls.
+    """
+    if (
+        sampling_interval is None
+        and daylight_mask is None
+        and density_baseline is not None
+    ):
+        return _legacy_linearity_scores(data_matrix, capacity, density_baseline)
+    if sampling_interval is None or daylight_mask is None:
+        raise ValueError("Supply both sampling_interval and daylight_mask.")
+
+    data = np.asarray(data_matrix)
+    if data.ndim != 2 or data.dtype.kind not in "fiu":
+        raise ValueError("data_matrix must be a two-dimensional real array.")
+    daylight = np.asarray(daylight_mask)
+    if daylight.dtype != bool or daylight.shape != data.shape:
+        raise ValueError("daylight_mask must be Boolean with the shape of data_matrix.")
+    interval_ns = fixed_duration(sampling_interval, "sampling_interval").value
+    if interval_ns <= 0:
+        raise ValueError("sampling_interval must be positive.")
+
+    infill = np.zeros_like(daylight)
+    scores = np.full(data.shape[1], np.nan)
+    if not np.isfinite(capacity) or capacity <= 0:
+        return scores, infill
+
+    span_ns = 30 * 10**9
+    # Two anchors and two interior samples span at least three intervals.
+    minimum_steps = max(3, (span_ns + interval_ns - 1) // interval_ns)
+    if len(data) > minimum_steps:
+        for trace, day, flags in zip(data.T, daylight.T, infill.T):
+            _flag_straight_ramps(trace, day, capacity, minimum_steps, flags)
+
+    daylight_count = daylight.sum(axis=0)
+    np.divide(infill.sum(axis=0), daylight_count, out=scores, where=daylight_count > 0)
+    return scores, infill
+
+
+def _flag_straight_ramps(trace, daylight, capacity, minimum_steps, flags):
+    trace = trace.astype(np.result_type(trace.dtype, np.float64), copy=False)
+    capacity = trace.dtype.type(capacity)
+    eligible = daylight & np.isfinite(trace) & (trace >= 0.005 * capacity)
+    values = np.where(eligible, trace, np.nan)
+    changes = np.diff(values)
+    tolerance = 64 * np.finfo(values.dtype).eps * capacity
+    continuous = np.abs(np.diff(changes)) <= tolerance
+    edges = np.flatnonzero(np.r_[True, ~continuous, True])
+    long_enough = np.diff(edges) >= minimum_steps
+    for first, last in zip(edges[:-1][long_enough], edges[1:][long_enough]):
+        if abs(values[last] - values[first]) <= tolerance:
+            continue
+        expected = np.linspace(values[first], values[last], last - first + 1)
+        if np.max(np.abs(values[first : last + 1] - expected)) <= tolerance:
+            flags[first + 1 : last] = True
+
+
+def _legacy_linearity_scores(data_matrix, capacity, density_baseline):
     temp_mat = np.copy(data_matrix)
     temp_mat[temp_mat < 0.005 * capacity] = np.nan
     difference_mat = np.round(temp_mat[1:] - temp_mat[:-1], 4)

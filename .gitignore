@@ -329,3 +329,9 @@ tags
 
 ### Webinar files
 !webinar/assets/
+
+# Local GitHub traffic and community monitoring archive
+/.local/github-monitor/
+
+# Local Oahu linearity study
+/studies/quality-02-oahu/

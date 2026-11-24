@@ -411,7 +411,8 @@ class DataHandler:
         :param density_upper_threshold: Upper threshold for data density during the
                                         quality flagging process.
         :type density_upper_threshold: float, default=1.05
-        :param linearity_threshold: Threshold for linearity checks during quality flagging.
+        :param linearity_threshold: Reject a day when the fraction of estimated
+            daylight flagged as straight-ramp infill reaches this threshold.
         :type linearity_threshold: float, default=0.1
         :param clear_day_smoothness_param: Smoothness parameter for clear day detection.
         :type clear_day_smoothness_param: float, default=0.9
@@ -1239,7 +1240,13 @@ class DataHandler:
                 self.raw_data_matrix, night_mask=~self.boolean_masks.daytime
             )
         if interp_day:
-            self.filled_data_matrix = interp_missing(self.filled_data_matrix)
+            matrix = self.filled_data_matrix
+            if matrix.dtype.kind == "f":
+                # Preserve straight ramps generated between low-precision observations.
+                matrix = matrix.astype(
+                    np.result_type(matrix.dtype, np.float64), copy=False
+                )
+            self.filled_data_matrix = interp_missing(matrix)
         else:
             msk = np.isnan(self.filled_data_matrix)
             self.filled_data_matrix[msk] = 0
@@ -1318,33 +1325,35 @@ class DataHandler:
         # scores should typically cluster within threshold values, if they
         # don't, we mark normal_quality_scores as false
         scores = np.c_[self.daily_scores.density, self.daily_scores.linearity]
-        db = DBSCAN(eps=0.03, min_samples=int(max(0.01 * scores.shape[0], 3))).fit(
-            scores
-        )
+        finite = np.isfinite(scores).all(axis=1)
+        finite_scores = scores[finite]
+        num_finite = len(finite_scores)
+        quality_clustering = np.full(len(scores), -1, dtype=int)
+        if num_finite:
+            quality_clustering[finite] = DBSCAN(
+                eps=0.03, min_samples=int(max(0.01 * num_finite, 3))
+            ).fit_predict(finite_scores)
         # Count the number of days that cluster to the main group but fall
         # outside the decision boundaries
+        labels = quality_clustering[finite]
+        density, linearity = finite_scores.T
         day_counts = [
             np.logical_or(
-                self.daily_scores.linearity[db.labels_ == lb] > linearity_threshold,
+                linearity[labels == lb] > linearity_threshold,
                 np.logical_or(
-                    self.daily_scores.density[db.labels_ == lb]
-                    < density_lower_threshold,
-                    self.daily_scores.density[db.labels_ == lb]
-                    > density_upper_threshold,
+                    density[labels == lb] < density_lower_threshold,
+                    density[labels == lb] > density_upper_threshold,
                 ),
             )
-            for lb in set(db.labels_)
+            for lb in set(labels)
         ]
         self.normal_quality_scores = np.any(
-            [
-                np.sum(day_count) <= max(5e-3 * self.num_days, 1)
-                for day_count in day_counts
-            ]
+            [np.sum(day_count) <= max(5e-3 * num_finite, 1) for day_count in day_counts]
         )
         self.__density_lower_threshold = density_lower_threshold
         self.__density_upper_threshold = density_upper_threshold
         self.__linearity_threshold = linearity_threshold
-        self.daily_scores.quality_clustering = db.labels_
+        self.daily_scores.quality_clustering = quality_clustering
 
     def get_density_scores(self, threshold=0.2, solver=None):
         if self.raw_data_matrix is None:
@@ -1363,18 +1372,36 @@ class DataHandler:
         return
 
     def get_linearity_scores(self):
-        if self.capacity_estimate is None:
-            self.capacity_estimate = np.quantile(self.filled_data_matrix, 0.95)
-        if self.daily_signals.seasonal_density_fit is None:
-            print("Run the density check first")
+        """Score straight ramps on the filled matrix and its current daylight grid.
+
+        The pipeline uses provisional daylight and records the score and mask
+        before clock correction. The scoring mask is available as
+        `boolean_masks.linearity_daylight`.
+        """
+        if self.daily_scores is None:
             return
+        filled = self.filled_data_matrix
+        daylight = self.boolean_masks.daytime
+        if filled is None or daylight is None or self.sampling_interval is None:
+            self.daily_scores.linearity = None
+            self.boolean_masks.infill = self.boolean_masks.linearity_daylight = None
+            print("Generate a filled data matrix and estimate daylight first.")
+            return
+
+        if self.capacity_estimate is None:
+            finite = filled[np.isfinite(filled)]
+            self.capacity_estimate = (
+                np.quantile(finite, 0.95) if finite.size else np.nan
+            )
         ls, im = make_linearity_scores(
-            self.filled_data_matrix,
+            filled,
             self.capacity_estimate,
-            self.daily_signals.seasonal_density_fit,
+            sampling_interval=self.sampling_interval,
+            daylight_mask=daylight,
         )
         self.daily_scores.linearity = ls
         self.boolean_masks.infill = im
+        self.boolean_masks.linearity_daylight = daylight
         return
 
     def score_data_set(self):
@@ -2570,3 +2597,4 @@ class BooleanMasks:
         self.daytime = None
         self.missing_values = None
         self.infill = None
+        self.linearity_daylight = None
