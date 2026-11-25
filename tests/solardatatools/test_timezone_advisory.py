@@ -139,13 +139,6 @@ def test_pipeline_advises_on_observations_without_shifting_them(
         handler.boolean_masks.missing_values, np.isnan(observed)
     )
     np.testing.assert_array_equal(handler.corrected_observed_matrix, observed)
-    observed_mask = np.isfinite(observed)
-    np.testing.assert_array_equal(
-        handler.filled_data_matrix[observed_mask], observed[observed_mask]
-    )
-    np.testing.assert_allclose(
-        handler.daily_signals.energy, handler.filled_data_matrix.sum(axis=0)
-    )
     assert handler.tz_correction == 0
     assert handler.possible_timezone_misalignment is expected
     advisory = [
@@ -155,12 +148,19 @@ def test_pipeline_advises_on_observations_without_shifting_them(
     deprecated = [w for w in caught if "correct_tz is deprecated" in str(w.message)]
     assert len(deprecated) == int(correct_tz is not None)
 
+    np.testing.assert_array_equal(
+        handler.extra_matrices["sensor"], sensor.reshape(observed.shape, order="F")
+    )
+    report = handler.report(verbose=False, return_values=True)
+    assert report["possible timezone misalignment"] is expected
     if scenario == "wrapped":
-        assert (
-            "no nonzero observations within the estimated daylight window"
-            in handler._error_msg
-        )
-        assert handler.daily_flags is None
+        stages = report["stage outcomes"]
+        assert stages["provisional daylight"]["status"] == "failed"
+        assert "No admitted observations." in stages["provisional daylight"]["reason"]
+        assert stages["matrix filling"]["status"] == "skipped"
+        assert handler.filled_data_matrix is None
+        assert handler.daily_signals.energy is None
+        assert handler.daily_flags.no_errors is None
         fig = handler.plot_heatmap()
         try:
             plotted = fig.axes[0].images[0].get_array().filled(np.nan)
@@ -171,11 +171,13 @@ def test_pipeline_advises_on_observations_without_shifting_them(
         np.testing.assert_array_equal(handler.raw_data_matrix, observed)
         return
 
+    observed_mask = np.isfinite(observed)
     np.testing.assert_array_equal(
-        handler.extra_matrices["sensor"], sensor.reshape(observed.shape, order="F")
+        handler.filled_data_matrix[observed_mask], observed[observed_mask]
+    )
+    np.testing.assert_allclose(
+        handler.daily_signals.energy, handler.filled_data_matrix.sum(axis=0)
     )
     assert np.isfinite(handler.daytime_analysis.sunrise_estimates).all()
     assert np.isfinite(handler.daytime_analysis.sunset_estimates).all()
-    report = handler.report(verbose=False, return_values=True)
     assert report["time zone correction"] == 0
-    assert report["possible timezone misalignment"] is expected

@@ -201,10 +201,18 @@ def test_unscored_days_leave_quality_clustering_unchanged():
     np.testing.assert_array_equal(*labels_by_record_size)
 
 
-def test_get_linearity_scores_after_failed_filling():
-    handler = DataHandler(raw_data_matrix=np.zeros((96, 12)))
+def test_get_linearity_scores_after_failed_filling(monkeypatch):
+    hours = np.arange(96) / 4
+    daylight_curve = np.maximum(0, np.sin(np.pi * (hours - 6) / 12))
+    handler = DataHandler(raw_data_matrix=np.tile(daylight_curve[:, None], (1, 12)))
+
+    def lose_filled_values(**kwargs):
+        handler.filled_data_matrix = np.zeros_like(handler.raw_data_matrix)
+
+    monkeypatch.setattr(handler, "make_filled_data_matrix", lose_filled_values)
     handler.run_pipeline(verbose=False)
     result = handler.report(verbose=False, return_values=True)["stage outcomes"]
+    assert result["provisional daylight"]["status"] == "success"
     assert result["matrix filling"]["status"] == "failed"
 
     handler.get_linearity_scores()

@@ -27,7 +27,7 @@ from solardatatools.time_axis_manipulation import (
 )
 from solardatatools.matrix_embedding import make_2d
 from solardatatools.data_quality import (
-    make_density_scores,
+    _density_scores,
     make_linearity_scores,
     make_quality_flags,
 )
@@ -322,6 +322,10 @@ class DataHandler:
         )
         return True
 
+    def _record_fit_warnings(self, stage, fit_warnings):
+        if fit_warnings:
+            self._stage_outcomes[stage]["warning"] = " ".join(fit_warnings)
+
     def _start_pipeline_attempt(self, units, *, fix_shifts, extra_cols):
         self._initialize_attributes()
         self.data_frame = None
@@ -507,14 +511,17 @@ class DataHandler:
                 ),
                 propagate=(ValueError, TypeError, KeyError),
             )
-            self._run_stage(
+            if self._run_stage(
                 "provisional daylight",
                 lambda: self._estimate_provisional_daylight(
                     random_seed=sunrise_sunset_random_seed,
                     solver=solver_convex,
                 ),
                 requires=("observation preparation",),
-            )
+            ):
+                self._record_fit_warnings(
+                    "provisional daylight", self.daytime_analysis.fit_warnings
+                )
             self._run_stage(
                 "matrix filling",
                 lambda: self._fill_observations(
@@ -740,7 +747,10 @@ class DataHandler:
             if self.capacity_changes is None:
                 raise _UnavailableResult("Capacity change results are unavailable.")
 
-        self._run_stage("daily scores", score_days, requires=("matrix filling",))
+        if self._run_stage("daily scores", score_days, requires=("matrix filling",)):
+            diagnostics = self.daily_signals.density_fit_diagnostics
+            if diagnostics is not None:
+                self._record_fit_warnings("daily scores", diagnostics.warnings)
         if not self._run_stage("daily flags", flag_days, requires=("daily scores",)):
             self.normal_quality_scores = None
             if self.daily_flags is not None:
@@ -753,6 +763,10 @@ class DataHandler:
             self.clear_day_analysis = None
             if self.daily_flags is not None:
                 self.daily_flags.clear = self.daily_flags.cloudy = None
+        else:
+            self._record_fit_warnings(
+                "clear days", getattr(self.clear_day_analysis, "fit_warnings", ())
+            )
         if not self._run_stage("clipping", detect_clipping, requires=("daily flags",)):
             self.clipping_analysis = None
             self.inverter_clipping = self.num_clip_points = None
@@ -762,10 +776,8 @@ class DataHandler:
                 self.daily_scores.clipping_1 = self.daily_scores.clipping_2 = None
         else:
             fit = getattr(self.clipping_analysis, "fit_result", None)
-            if fit is not None and fit.diagnostics.warnings:
-                self._stage_outcomes["clipping"]["warning"] = " ".join(
-                    fit.diagnostics.warnings
-                )
+            if fit is not None:
+                self._record_fit_warnings("clipping", fit.diagnostics.warnings)
         if not self._run_stage(
             "dataset scores", self.score_data_set, requires=("daily flags",)
         ):
@@ -829,6 +841,10 @@ class DataHandler:
         ):
             self.daytime_analysis = None
             self.boolean_masks.daytime = None
+        else:
+            self._record_fit_warnings(
+                "final daylight", self.daytime_analysis.fit_warnings
+            )
 
     def _align_extra_columns(self, extra_cols):
         if extra_cols is None:
@@ -1359,16 +1375,11 @@ class DataHandler:
         if self.raw_data_matrix is None:
             print("Generate a raw data matrix first.")
             return
-        s1, s2, s3 = make_density_scores(
-            self.raw_data_matrix,
-            threshold=threshold,
-            return_density_signal=True,
-            return_fit=True,
-            solver=solver,
-        )
-        self.daily_scores.density = s1
-        self.daily_signals.density = s2
-        self.daily_signals.seasonal_density_fit = s3
+        scores, density, fit = _density_scores(self.raw_data_matrix, threshold, solver)
+        self.daily_scores.density = scores
+        self.daily_signals.density = density
+        self.daily_signals.seasonal_density_fit = fit.components["seasonal"]
+        self.daily_signals.density_fit_diagnostics = fit.diagnostics
         return
 
     def get_linearity_scores(self):
@@ -2577,6 +2588,7 @@ class DailySignals:
     def __init__(self):
         self.density = None
         self.seasonal_density_fit = None
+        self.density_fit_diagnostics = None
         self.energy = None
 
 

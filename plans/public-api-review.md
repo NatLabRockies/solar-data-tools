@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-24, SENSOR-02 completion and SD-01 Fourier formulation
+- Last revised: 2026-11-24, SD-01 annual quantile implementation checkpoint
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -1223,17 +1223,17 @@ with no usable candidate is a numerical failure, not a no-change finding.
 
 #### SD-01 — Solver dispatch changes the estimator and discards options [P2]
 
-- **Locations:** time-shift dispatch around lines 84–122; quantile dispatch around
-  lines 175–195. Related:
+- **Locations:** time-shift dispatch around lines 84–122 and the native annual
+  quantile entry point `tl1_l2d2p365`. Related:
   `_cvx_signal_decompositions.py:221–224`, `algorithms/time_shifts.py:73–78`, and
   QSS branches in `data_handler.py:1362–1410`.
-- **Finding:** solver dispatch changes the current time-shift and
-  seasonal-quantile models.
+- **Finding:** solver dispatch still changes the time-shift model. The table
+  also records the seasonal-quantile and clipping branches before migration.
 
   | Estimator | CLARABEL/default OSD path | MOSEK/CVXPY path |
   | --- | --- | --- |
   | Time shifts | Three-harmonic annual Fourier component and ordinary TV | Smooth 365-periodic vector and five IRL1 passes |
-  | Seasonal quantile | Three-harmonic Fourier component with an unpenalized offset, regardless of `yearly_periodic` | Squared second-difference penalty with weight 500, with exact 365-periodicity when `yearly_periodic=True` and the record exceeds 365 samples |
+  | Seasonal quantile (legacy) | Three-harmonic Fourier component with an unpenalized offset, regardless of `yearly_periodic` | Squared second-difference penalty with weight 500, with exact 365-periodicity when `yearly_periodic=True` and the record exceeds 365 samples |
   | Clipping CDF (historical, fixed in `574b6ab`) | Used supplied `w0` and `w1` | Discarded supplied `w0` and `w1` |
 
   Dispatch also forces `sum_card=False`. The capacity implementation replaces
@@ -1261,8 +1261,8 @@ with no usable candidate is a numerical failure, not a no-change finding.
   reject the retired nonperiodic request rather than silently fit an annual
   model. Migrate callers and tests to the annual-only contract.
 - **Scalar-quantile Fourier formulation, 2026-11-24.** The daily-grid baseline
-  for the annual model is the current default path in `tl1_l2d2p365`. It calls
-  `_osd_tl1_l2d2p365`, which constructs `SumQuantile(tau=tau, weight=w0)` and
+  for the annual model is the previous default path in `tl1_l2d2p365`. It called
+  `_osd_tl1_l2d2p365`, which constructed `SumQuantile(tau=tau, weight=w0)` and
   `Fourier(3, T, 365.2425, weight=1e-3)`. Let $T$ be the full grid length,
   $p=365.2425$ the legacy period in samples, and $t=0,\ldots,T-1$. On the daily
   grid $p=P/\Delta$ with $P=365.2425$ days and $\Delta=1$ day. The seasonal
@@ -1313,9 +1313,9 @@ with no usable candidate is a numerical failure, not a no-change finding.
   undetermined. At $\tau=0$ or $\tau=1$ the loss is one-sided and each residual
   entry outside $\mathcal K$ has a half-line of minimizers.
 
-  The current `gfosd` mask intersects `use_ixs` with the non-NaN entries and
-  defaults to all non-NaN entries. The native model uses the finite-observation
-  convention above. The current smoother returns $x_1$ throughout the grid.
+  The previous `gfosd` path intersected `use_ixs` with the non-NaN entries and
+  defaulted to all non-NaN entries. The native model uses the finite-observation
+  convention above and returns both components throughout the grid.
 
   The source trace follows the inspected `sig-decomp` 0.3.2 installation.
   `gfosd/components/utilities.py` defines the basis and diagonal weights,
@@ -1427,6 +1427,48 @@ with no usable candidate is a numerical failure, not a no-change finding.
   and sunrise/sunset callers against the agreed model. Do not preserve the old
   nonperiodic numerical fixtures as requirements of the replacement.
 - **Reference:** [CVXPY solver selection and options](https://www.cvxpy.org/tutorial/solvers/index.html).
+
+##### SD-01 checkpoint — annual scalar quantile smoother
+
+- **Status, 2026-11-24:** implemented in the working tree for review.
+- **Construction:** `solardatatools/_tl1_l2d2p365.py` uses the specified
+  daily-grid Fourier objective. It eliminates residual entries outside
+  $\mathcal K$ at their unique minimum and restores those zeros in the
+  full-grid result. The solver sees a consistency equality on the admitted
+  observations. The maximum absolute linking error is checked against
+  $10^{-6}\max(1,\max_{t\in\mathcal K}|y_t|)$.
+  NumPy masks on the signal and the Boolean selector exclude hidden values.
+  For numerical conditioning, translate the free intercept by the admitted
+  sample quantile when the translated values are finite. Use zero otherwise.
+  Divide both objective terms by $\min(1,\sqrt{w_0})$.
+  Report the seasonal values and objective in the
+  original units. For identical admitted values, recover the unique
+  zero-cost fit after backend acceptance. Both the residual and harmonic
+  costs vanish at the observed constant, and the nonzero harmonic weights
+  rule out any other zero-cost fit.
+  When the admitted fitted values leave harmonic directions undetermined,
+  subtract the first admitted basis row to eliminate the offset. Find the
+  minimum-norm harmonic vector in the weighted coordinates subject to those
+  fitted contrasts, and recover the offset from the anchored value. Evaluate
+  the objective on the recovered fit. Reject it if the objective exceeds
+  that of the feasible constant at the translation value by more than
+  $w_0|\mathcal K|$ times the linking tolerance. This allowance uses the
+  Lipschitz bound of one for the pinball loss.
+- **Public API:** `tl1_l2d2p365` returns a `DecompositionResult` with the
+  `seasonal` and `residual` roles. Select other CVXPY backends with
+  `solver` and pass settings through `solver_options`. The migration
+  guide in the Signal Decompositions reference covers the removed
+  `return_all` and `yearly_periodic` keywords and the available diagnostics.
+  Density, clear-day, and sunrise/sunset callers use the named seasonal
+  result. Pipeline solver selection continues through `solver_convex`.
+  Accepted inaccurate fits carry warnings in the relevant stage outcomes.
+- **Daylight integration:** a training split requires at least two usable days
+  for each boundary. A single-day record can receive a full-data fit at a
+  threshold with both boundaries observed. A new attempt clears the prior
+  daylight estimates before fitting.
+  When a provisional boundary has no admitted observations, DH-07 records
+  the unavailable daylight estimate and skips filling. Observation diagnostics,
+  the raw heatmap, and the timezone advisory remain available.
 
 ##### SD-01 first checkpoint — constrained filter and clipping
 

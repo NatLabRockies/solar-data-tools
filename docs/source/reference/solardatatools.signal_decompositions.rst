@@ -74,3 +74,77 @@ Explicit caller choices take precedence. Pass
 workaround. CVXPY continues to reject conflicting explicit
 ``ignore_dpp=True`` and ``enforce_dpp=True`` flags. Other solvers' compilation
 defaults are unchanged. Direct filter and clipping calls use the same rules.
+
+Migrating the annual quantile smoother
+--------------------------------------
+
+``tl1_l2d2p365`` keeps its import path and fits one annual Fourier model to
+daily samples. The basis has a 365.2425-day period, an unpenalized constant,
+and three cosine/sine pairs. The objective adds the sum of pinball losses
+weighted by ``w0`` to a quadratic penalty on the Fourier coefficients.
+For harmonic :math:`k`, the penalty on each coefficient has weight
+:math:`2\pi^2(10^{-3})^2 k^2/365.2425`.
+Use a finite positive ``w0`` and a ``tau`` strictly between zero and one.
+
+Remove ``return_all`` from calls. Read ``result.components["seasonal"]``
+for the fitted curve. Use ``result.diagnostics.objective_value`` in place of
+the second item from the old MOSEK tuple or the ``objective_value`` attribute
+of the old OSD problem.
+
+Remove ``yearly_periodic`` from calls. The smoother always uses annual Fourier
+seasonality. Calls requesting ``yearly_periodic=False`` raise ``TypeError``.
+The previous MOSEK call used a second-difference smoother and may produce
+different fitted values from the annual model.
+
+.. code-block:: python
+
+   from solardatatools.signal_decompositions import tl1_l2d2p365
+
+   result = tl1_l2d2p365(
+       daily_signal, use_ixs=selected_days, tau=0.8, solver="CLARABEL",
+       solver_options={"max_iter": 100},
+   )
+   if result.has_fit:
+       seasonal = result.components["seasonal"]
+       residual = result.components["residual"]
+       admitted = result.observation_mask
+   else:
+       print(result.diagnostics.failure_reason)
+
+Both components cover every day on the input grid, including missing and
+held-out days. The admitted mask selects the finite entries that enter the
+fit. Masked entries in a NumPy masked array are excluded from both the
+observations and the optional Boolean selector. The residual is zero
+outside the admitted mask, and the seasonal component
+supplies the prediction there. Diagnostics retain the backend's status and
+maximum absolute linking error on admitted days. A usable fit needs finite
+values and a linking error within
+``1e-6 * max(1, max(abs(daily_signal[admitted])))``. An accepted
+``optimal_inaccurate`` result retains that status and carries a warning.
+The solver translates the intercept by the admitted sample quantile when
+that translation gives finite values. It uses zero otherwise. It divides
+the objective by :math:`\min(1,\sqrt{w_0})`. The reported
+seasonal values and objective are in the original units. With identical
+admitted values, an accepted solve returns the exact constant fit with zero
+objective. When the admitted fitted values underdetermine the Fourier
+coefficients, recovery selects the coefficients with the smallest harmonic
+penalty at those values. The linking error records the backend values before
+recovery. The returned objective is evaluated on the recovered fit. A result
+is rejected if that objective exceeds the objective of the constant fit at
+the translation value by more than the residual weight times the number of
+admitted days times the linking tolerance.
+
+CLARABEL is the default. Supply the ``solver`` and ``verbose`` arguments
+by keyword. Pass ``solver="MOSEK"`` or another suitable installed CVXPY
+solver to select the backend, and pass its settings with ``solver_options``.
+The same settings can be passed to
+``make_density_scores``, ``ClearDayDetection.find_clear_days``, and
+``SunriseSunset.run_optimizer`` or ``calculate_times``. In
+``DataHandler.run_pipeline``, ``solver_convex`` selects the solver for
+daylight, density, and clear-day fits, subject to the existing MOSEK preflight.
+The corresponding stage outcomes include warnings from accepted inaccurate
+fits.
+If either provisional daylight fit has no admitted observations, the pipeline
+reports that daylight estimate as unavailable and skips matrix filling. The
+handler keeps the raw observations, and the partial report retains the
+timezone advisory.

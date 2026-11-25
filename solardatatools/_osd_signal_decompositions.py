@@ -9,11 +9,7 @@ the OSD modeling language. The defined signal decompositions are:
     - `l1d1`: piecewise constant heuristic, l1-norm of first order differences
     - `l2d2p365`: small second order diffs (smooth) and 365-periodic
 
-2. `_osd_tl1_l2d2p365`: similar to (2), estimating a smooth, seasonal component with an asymmetric laplacian noise model, fitting a local quantile instead of a local average
-    - `tl1`: 'tilted l1-norm,' also known as quantile cost function
-    - `l2d2p365`: small second order diffs (smooth) and 365-periodic
-
-3. `_osd_l1_l1d1_l2d2p365`: like (1) but with an asymmetric residual cost instead of Gaussian residuals
+2. `_osd_l1_l1d1_l2d2p365`: like (1) but with an asymmetric residual cost instead of Gaussian residuals
     - `l1`: l1-norm
     - `l1d1`: piecewise constant heuristic, l1-norm of first order differences
     - `l2d2p365`: small second order diffs (smooth) and 365-periodic
@@ -27,7 +23,6 @@ from gfosd.components import (
     SumAbs,
     SumSquare,
     SumCard,
-    SumQuantile,
     Aggregate,
     AverageEqual,
     Periodic,
@@ -122,57 +117,6 @@ def _osd_l2_l1d1_l2d2p365(
         return s_hat, s_seas, s_error, problem
 
     return s_hat, s_seas
-
-
-def _osd_tl1_l2d2p365(
-    signal,
-    use_ixs=None,
-    tau=0.75,
-    w0=1,
-    return_all=False,
-    solver="OSQP",
-    verbose=False,
-):
-    """
-    Used in:
-        solardatatools/algorithms/sunrise_sunset_estimation.py
-        solardatatools/clear_day_detection.py
-        solardatatools/data_quality.py
-        solardatatools/sunrise_sunset.py
-
-    This is a convex problem and the default solver across SDT is OSQP.
-
-    :param signal: A 1d numpy array (must support boolean indexing) containing
-        the signal of interest
-    :param use_ixs: List of booleans indicating indices to use in signal.
-        None is default (uses the entire signal).
-    :param tau: Quantile regression parameter,between zero and one, and it sets
-        the approximate quantile of the residual distribution that the model is fit to
-        See: https://colab.research.google.com/github/cvxgrp/cvx_short_course/blob/master/applications/quantile_regression.ipynb
-    :param w0: Weight on the residual component
-    :param w1: The regularization parameter to control the smoothness of the
-        seasonal signal
-    :param yearly_periodic: Adds periodicity constraint to signal decomposition
-    :param return_all: Returns all components and the objective value. Used for tests.
-    :param solver: Solver to use for the decomposition
-    :param verbose: Sets verbosity
-    :return: A tuple with three 1d numpy arrays containing the three signal component estimates
-    """
-    c1 = SumQuantile(tau=tau, weight=w0)
-    T = len(signal)
-    c2 = Fourier(3, T, 365.2425, weight=1e-3)
-
-    classes = [c1, c2]
-
-    problem = Problem(signal, classes, use_set=use_ixs)
-
-    problem.decompose(solver=solver, verbose=verbose)
-    s_seas = problem.decomposition[1]
-
-    if return_all:
-        return s_seas, problem
-
-    return s_seas
 
 
 def _osd_l1_l1d1_l2d2p365(

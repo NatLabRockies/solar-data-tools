@@ -41,26 +41,18 @@ the fitted trend estimate the shape of the density used to locate candidate
 clipping levels.
 """
 
-from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import replace
 
 import cvxpy as cp
 import numpy as np
 
 from solardatatools._decomposition_result import DecompositionResult, SolveDiagnostics
-
-
-_FEASIBILITY_TOLERANCE = 1e-6
-_RESERVED_OPTIONS = {
-    "solver",
-    "verbose",
-    "solver_path",
-    "method",
-    "gp",
-    "qcp",
-    "requires_grad",
-}
+from solardatatools._decomposition_utils import (
+    _FEASIBILITY_TOLERANCE,
+    _copy_solver_options,
+    _observation_mask,
+    _solver_configuration,
+)
 
 
 def _validate_signal(signal):
@@ -83,17 +75,6 @@ def _validate_weights(w0, w1):
             "w0 and w1 must be finite nonnegative scalars, with one positive."
         )
     return tuple(map(float, weights))
-
-
-def _copy_solver_options(options):
-    snapshot = {}
-    for name, value in options.items():
-        try:
-            snapshot[name] = deepcopy(value)
-        except TypeError:
-            # Some backends accept native handles, such as a solver environment.
-            snapshot[name] = value
-    return snapshot
 
 
 class _L2L1D2ConstrainedWorkspace:
@@ -140,23 +121,9 @@ class _L2L1D2ConstrainedWorkspace:
         signal = _validate_signal(signal)
         if signal.size != self.size:
             raise ValueError("signal length must match the filter workspace.")
-        mask = np.isfinite(signal)
-        if use_ixs is not None:
-            use_ixs = np.asarray(use_ixs)
-            if use_ixs.shape != signal.shape or use_ixs.dtype.kind != "b":
-                raise ValueError("use_ixs must be a Boolean array matching signal.")
-            mask &= use_ixs
+        mask = _observation_mask(signal, use_ixs)
         w0, w1 = _validate_weights(w0, w1)
-        solver = "CLARABEL" if solver is None else solver
-        if not isinstance(solver, str) or solver not in cp.installed_solvers():
-            raise ValueError(f"Solver {solver!r} is unavailable in CVXPY.")
-        if solver_options is not None and not isinstance(solver_options, Mapping):
-            raise TypeError("solver_options must be a mapping.")
-        options = dict(solver_options) if solver_options is not None else {}
-        if reserved := _RESERVED_OPTIONS.intersection(options):
-            raise ValueError(
-                f"Unsupported solver_options keys: {', '.join(sorted(reserved))}."
-            )
+        solver, options = _solver_configuration(solver, solver_options)
         if (
             solver == "CLARABEL"
             and "ignore_dpp" not in options

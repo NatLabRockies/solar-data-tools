@@ -8,6 +8,7 @@ This module contains functions for identifying corrupt or bad quality data.
 import numpy as np
 from scipy.stats import mode
 from solardatatools._time_grid import fixed_duration
+from solardatatools._tl1_l2d2p365 import _seasonal_component
 from solardatatools.signal_decompositions import tl1_l2d2p365
 
 
@@ -39,21 +40,23 @@ def make_density_scores(
     return_density_signal=False,
     return_fit=False,
     solver=None,
+    *,
+    solver_options=None,
 ):
     """Return continuous daily density ratios, using CLARABEL by default.
 
     Estimate capacity from finite power observations and fit the density
     baseline using only days with finite observations and eligible density.
+    Pass solver-specific settings for the baseline through ``solver_options``.
     """
-    density_signal, fit_signal, _ = _fit_density_baseline(
-        data_matrix, threshold, solver
+    scores, density_signal, fit = _density_scores(
+        data_matrix, threshold, solver, solver_options=solver_options
     )
-    scores = density_signal / fit_signal
     out = [scores]
     if return_density_signal:
         out.append(density_signal)
     if return_fit:
-        out.append(fit_signal)
+        out.append(fit.components["seasonal"])
     if len(out) == 1:
         out = out[0]
     else:
@@ -61,19 +64,29 @@ def make_density_scores(
     return out
 
 
-def _fit_density_baseline(data_matrix, threshold, solver):
+def _density_scores(data_matrix, threshold, solver, *, solver_options=None):
+    density, fit, _ = _fit_density_baseline(
+        data_matrix, threshold, solver, solver_options=solver_options
+    )
+    seasonal = _seasonal_component(fit, "density baseline")
+    return density / seasonal, density, fit
+
+
+def _fit_density_baseline(data_matrix, threshold, solver, *, solver_options=None):
     density_signal, observed_days = _daily_density(data_matrix, capacity_fraction=0.02)
     if not observed_days.any():
         raise ValueError("No observations for fitting the density baseline.")
     use_days = observed_days & (density_signal > threshold) & (density_signal < 0.8)
     if not use_days.any():
         raise ValueError("No eligible days for fitting the density baseline.")
-    if solver is None:
-        solver = "CLARABEL"
-    fit_signal = tl1_l2d2p365(density_signal, use_ixs=use_days, tau=0.85, solver=solver)
-    if fit_signal is None:
-        raise ValueError("The density baseline fit returned no result.")
-    return density_signal, fit_signal, observed_days
+    result = tl1_l2d2p365(
+        density_signal,
+        use_ixs=use_days,
+        tau=0.85,
+        solver=solver,
+        solver_options=solver_options,
+    )
+    return density_signal, result, observed_days
 
 
 def _daily_density(data_matrix, capacity_fraction):
@@ -243,7 +256,7 @@ def dataset_quality_score(
 
     ``data_matrix`` must have at least one sample row and one day column.
     An empty matrix, invalid mask, or unusable advanced fit raises ``ValueError``.
-    Exceptions from the baseline solver propagate to the caller.
+    A numerical solve failure includes the baseline fit's diagnostic reason.
     """
     data_matrix = np.asarray(data_matrix)
     if data_matrix.ndim != 2 or not data_matrix.size:
@@ -265,9 +278,10 @@ def dataset_quality_score(
 
 
 def _advanced_density_flags(data_matrix, threshold):
-    density_signal, fit, observed_days = _fit_density_baseline(
+    density_signal, result, observed_days = _fit_density_baseline(
         data_matrix, threshold, solver=None
     )
+    fit = _seasonal_component(result, "density baseline")
     usable = observed_days & np.isfinite(fit) & (fit > 0)
     scores = np.full_like(density_signal, np.nan)
     with np.errstate(over="ignore"):

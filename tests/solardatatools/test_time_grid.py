@@ -167,7 +167,7 @@ def test_sunrise_mask_uses_exact_nonintegral_minute_rows(monkeypatch):
     matrix = np.zeros((rows, 4))
     matrix[240:720] = 1000
     monkeypatch.setattr(
-        "solardatatools.algorithms.sunrise_sunset_estimation.rise_set_smoothed",
+        "solardatatools.algorithms.sunrise_sunset_estimation._smooth_sunrise_sunset",
         lambda measured, **kwargs: {
             "sunrises": np.full(4, 6),
             "sunsets": np.full(4, 18),

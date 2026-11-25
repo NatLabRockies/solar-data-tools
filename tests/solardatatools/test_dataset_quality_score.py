@@ -8,6 +8,21 @@ from solardatatools.data_quality import (
     make_density_scores,
     make_quality_flags,
 )
+from solardatatools.signal_decompositions import DecompositionResult, SolveDiagnostics
+
+
+def _baseline_result(seasonal):
+    if seasonal is None:
+        return DecompositionResult(
+            np.ones(3, dtype=bool),
+            None,
+            SolveDiagnostics("CLARABEL", {}, failure_reason="Test solver failure."),
+        )
+    return DecompositionResult(
+        np.ones(len(seasonal), dtype=bool),
+        {"seasonal": seasonal},
+        SolveDiagnostics("CLARABEL", {}, solver_status="optimal"),
+    )
 
 
 def test_advanced_quality_score_counts_passing_days(monkeypatch):
@@ -19,7 +34,9 @@ def test_advanced_quality_score_counts_passing_days(monkeypatch):
         np.testing.assert_array_equal(use_ixs, [True] * 7 + [False])
         # One passing ratio, both strict bounds, two out-of-range ratios,
         # two unavailable scores, and a missing day with a usable baseline.
-        return np.array([0.5, 0.5 / 0.6, 0.5 / 1.05, 2.0, 0.0625, 0.0, np.nan, 0.5])
+        return _baseline_result(
+            np.array([0.5, 0.5 / 0.6, 0.5 / 1.05, 2.0, 0.0625, 0.0, np.nan, 0.5])
+        )
 
     monkeypatch.setattr(data_quality, "tl1_l2d2p365", fit)
     assert dataset_quality_score(data) == 1 / 8
@@ -51,7 +68,7 @@ def test_baseline_distinguishes_observed_zero_density_from_missing(monkeypatch):
     def fit(signal, *, use_ixs, **kwargs):
         np.testing.assert_array_equal(signal, [0.5, 0, 0])
         np.testing.assert_array_equal(use_ixs, [True, True, False])
-        return np.full(3, 0.5)
+        return _baseline_result(np.full(3, 0.5))
 
     monkeypatch.setattr(data_quality, "tl1_l2d2p365", fit)
     np.testing.assert_array_equal(make_density_scores(data, threshold=-0.01), [1, 0, 0])
@@ -123,7 +140,9 @@ def test_advanced_quality_score_requires_days_for_fitting(monkeypatch):
 
 @pytest.mark.parametrize("fit", [None, np.array([np.nan, 0.0, np.inf])])
 def test_advanced_quality_score_rejects_unusable_fit(monkeypatch, fit):
-    monkeypatch.setattr(data_quality, "tl1_l2d2p365", lambda *args, **kwargs: fit)
+    monkeypatch.setattr(
+        data_quality, "tl1_l2d2p365", lambda *args, **kwargs: _baseline_result(fit)
+    )
     data = np.tile([[0.0], [0.0], [10.0], [10.0]], (1, 3))
     with pytest.raises(ValueError, match="density baseline fit returned no"):
         dataset_quality_score(data)
