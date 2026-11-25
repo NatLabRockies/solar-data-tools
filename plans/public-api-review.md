@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-24, SENSOR-02 implementation and verification
+- Last revised: 2026-11-24, SENSOR-02 completion and SD-01 Fourier formulation
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -95,6 +95,10 @@ SD-07 and its SD-01 cross-reference. Neither is deferred by this section, and
 their recorded verification requirements remain unchanged.
 
 ### Latest completion status (2026-11-24)
+
+SENSOR-02 is complete on `cleanup` in `f3c3c45`. The committed diff matches
+the independently reviewed hash. The final review found no remaining issues
+and recorded 181 tests passed and two skipped. See Section 9.
 
 SENSOR-01 is complete on `cleanup` in `723debd`. The committed diff and
 new regression test match the independently reviewed hashes. The review
@@ -1055,7 +1059,8 @@ the other physical-time conversions; no duplicate correction is intended here.
 
 #### SENSOR-02 — Unavailable subsets and failed folds break sensor identification [P2]
 
-- **Status, 2026-11-24:** implemented in the working tree for review.
+- **Status, 2026-11-24:** complete on `cleanup` in `f3c3c45` after
+  independent review. See Section 9.
 - **Location:** `SensorIdentification.identify`.
 - **Finding:** empty or undersized `no_errors`, `clear`, and `cloudy`
   subsets failed when the split iterator advanced. A failed fit appended
@@ -1219,16 +1224,17 @@ with no usable candidate is a numerical failure, not a no-change finding.
 #### SD-01 — Solver dispatch changes the estimator and discards options [P2]
 
 - **Locations:** time-shift dispatch around lines 84–122; quantile dispatch around
-  lines 163–183; constrained-filter dispatch around lines 246–254. Related:
+  lines 175–195. Related:
   `_cvx_signal_decompositions.py:221–224`, `algorithms/time_shifts.py:73–78`, and
   QSS branches in `data_handler.py:1362–1410`.
-- **Finding:** the current solver branches select the following different models.
+- **Finding:** solver dispatch changes the current time-shift and
+  seasonal-quantile models.
 
   | Estimator | CLARABEL/default OSD path | MOSEK/CVXPY path |
   | --- | --- | --- |
   | Time shifts | Three-harmonic annual Fourier component and ordinary TV | Smooth 365-periodic vector and five IRL1 passes |
-  | Seasonal quantile | Three-harmonic Fourier component; ignores `yearly_periodic=False` | Second-difference regularization with optional 365-periodicity |
-  | Clipping CDF | Uses supplied `w0` and `w1` | Discards supplied `w0` and `w1` |
+  | Seasonal quantile | Three-harmonic Fourier component with an unpenalized offset, regardless of `yearly_periodic` | Squared second-difference penalty with weight 500, with exact 365-periodicity when `yearly_periodic=True` and the record exceeds 365 samples |
+  | Clipping CDF (historical, fixed in `574b6ab`) | Used supplied `w0` and `w1` | Discarded supplied `w0` and `w1` |
 
   Dispatch also forces `sum_card=False`. The capacity implementation replaces
   other solver choices with CLARABEL despite its convex formulation.
@@ -1254,6 +1260,67 @@ with no usable candidate is a numerical failure, not a no-change finding.
   the migration guide. If a compatibility wrapper is retained, it must explicitly
   reject the retired nonperiodic request rather than silently fit an annual
   model. Migrate callers and tests to the annual-only contract.
+- **Scalar-quantile Fourier formulation, 2026-11-24.** The daily-grid baseline
+  for the annual model is the current default path in `tl1_l2d2p365`. It calls
+  `_osd_tl1_l2d2p365`, which constructs `SumQuantile(tau=tau, weight=w0)` and
+  `Fourier(3, T, 365.2425, weight=1e-3)`. Let $T$ be the full grid length,
+  $p=365.2425$ the legacy period in samples, and $t=0,\ldots,T-1$. On the daily
+  grid $p=P/\Delta$ with $P=365.2425$ days and $\Delta=1$ day. The seasonal
+  component $x_1=B\theta$ is defined on the full grid by
+
+  $$
+  x_{1,t}=a_0+\sum_{k=1}^3
+  \left(a_k\cos\frac{2\pi k t}{p}+b_k\sin\frac{2\pi k t}{p}\right),
+  \qquad \theta=(a_0,a_1,b_1,a_2,b_2,a_3,b_3)\in\mathbf{R}^7.
+  $$
+
+  The leading column of $B$ is all ones. Its coefficient $a_0$ is a freely
+  fitted offset with zero penalty. With $\gamma=10^{-3}$, `gfosd` builds
+
+  $$
+  D=\frac{2\pi\gamma}{\sqrt p}\operatorname{diag}(0,1,1,2,2,3,3).
+  $$
+
+  `Basis._make_P` squares the diagonal entries to form the coefficient block
+  $D^T D$. `Problem._solve_cvx` multiplies the quadratic form by $1/2$, giving
+  the exact seasonal penalty
+
+  $$
+  \frac12\|D\theta\|_2^2
+  =\frac{2\pi^2\gamma^2}{p}\sum_{k=1}^3 k^2(a_k^2+b_k^2).
+  $$
+
+  The cosine and sine coefficients share a weight within each harmonic. These
+  quadratic weights are in the ratio $1:4:9$ across harmonics. The factor
+  $\gamma$ is inside $D$, so the objective uses $\gamma^2$. The full problem is
+
+  $$
+  \begin{array}{ll}
+  \text{minimize}_{x_0,\theta} &
+  w_0\displaystyle\sum_{t=0}^{T-1}\rho_\tau(x_{0,t})
+  +\tfrac12\|D\theta\|_2^2 \\
+  \text{subject to} & y_t=x_{0,t}+(B\theta)_t,\qquad t\in\mathcal K,
+  \end{array}
+  \qquad \rho_\tau(r)=\tfrac12|r|+(\tau-\tfrac12)r.
+  $$
+
+  Both components are in $\mathbf{R}^T$. The residual loss is an unnormalized
+  sum with public defaults $w_0=1$ and $\tau=0.75$. The native quantile smoother's
+  public parameter domain is finite $w_0>0$ and $0<\tau<1$. On this domain,
+  the residual cost is uniquely minimized at $x_{0,t}=0$ for each
+  $t\notin\mathcal K$.
+  At $w_0=0$ the residual cost vanishes and the data leave the fitted offset
+  undetermined. At $\tau=0$ or $\tau=1$ the loss is one-sided and each residual
+  entry outside $\mathcal K$ has a half-line of minimizers.
+
+  The current `gfosd` mask intersects `use_ixs` with the non-NaN entries and
+  defaults to all non-NaN entries. The native model uses the finite-observation
+  convention above. The current smoother returns $x_1$ throughout the grid.
+
+  The source trace follows the inspected `sig-decomp` 0.3.2 installation.
+  `gfosd/components/utilities.py` defines the basis and diagonal weights,
+  `gfosd/components/basis_constraints.py` builds the coefficient block, and
+  `gfosd/problem.py` supplies the mask and objective prefactor.
 - **Owner decision, 2026-10-21:** retain exact 365-day shift recurrence as an
   explicitly opt-in option in the native model, default off. Keep its meaning
   distinct from the 365.2425-day Fourier seasonal default. Remove the pipeline's
@@ -6305,8 +6372,11 @@ register.
   NumPy 2.4.2, scikit-learn 1.8.0, and CVXPY 1.8.1. Ruff lint, Ruff
   format, and `git diff --check` passed. The reviewer found no issues.
 
-### 2026-11-24 — SENSOR-02 implementation and verification
+### 2026-11-24 — SENSOR-02 completion
 
+- **Completion:** the owner committed SENSOR-02 in `f3c3c45` on `cleanup`.
+  The full four-file diff matches the SHA-256 hash of the independently
+  reviewed checkpoint. The working tree was clean before this update.
 - **Owner decision:** require each eligible sensor to complete every
   planned fold for its subset. Select a sole eligible sensor and flag
   incomplete coverage. Agreement among available selections is undetermined
@@ -6320,7 +6390,8 @@ register.
   checks that a rerun uses the same 22 common samples, rankings, and coverage
   as a fresh identifier. The user guide identifies the finite validation
   metrics required for eligibility and explains undefined correlation.
-- **Verification:** all ten sensor identification tests passed. The full
-  suite passed with 181 tests and two skips on Python 3.13.11, NumPy 2.4.2,
-  scikit-learn 1.8.0, and CVXPY 1.8.1. Ruff lint, Ruff format, and
-  `git diff --check` passed.
+- **Verification:** the builder and independent reviewer each reported
+  181 tests passed and two skipped, including all ten sensor identification
+  tests. The builder used Python 3.13.11, NumPy 2.4.2, scikit-learn 1.8.0,
+  and CVXPY 1.8.1. Ruff lint, Ruff format, and `git diff --check` passed.
+  The final review found no remaining issues.
