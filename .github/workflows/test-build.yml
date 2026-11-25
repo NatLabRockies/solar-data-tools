@@ -3,21 +3,55 @@ name: Test Build
 on:
   pull_request:
     branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MPLBACKEND: Agg
+
 jobs:
   build-pypi:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install Twine and Build
-        run: sudo pip install twine build
+        run: python -m pip install twine build
 
-      - name: Create the distribution
+      - name: Build and check distributions
         run: |
-          git fetch --prune --unshallow --tags
-          sudo python3 -m build
+          python -m build
+          python -m twine check dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+
+      - name: Check the installed wheel outside the checkout
+        run: |
+          wheels=(dist/*.whl)
+          if [[ "${#wheels[@]}" -ne 1 || ! -f "${wheels[0]}" ]]; then
+            echo "Expected exactly one built wheel." >&2
+            exit 1
+          fi
+          wheel="$GITHUB_WORKSPACE/${wheels[0]}"
+          smoke_dir="$(mktemp -d "$RUNNER_TEMP/wheel-smoke.XXXXXX")"
+          cp .github/scripts/wheel_smoke.py "$smoke_dir/"
+          cd "$smoke_dir"
+          python -m venv .venv
+          .venv/bin/python -m pip install "$wheel"
+          .venv/bin/python -m pip check
+          .venv/bin/python -I wheel_smoke.py "$GITHUB_WORKSPACE"

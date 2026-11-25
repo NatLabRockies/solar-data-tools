@@ -14,15 +14,12 @@
     - test_l2_l1d1_l2d2p365_yearly_periodic_sum_card
     - test_l2_l1d1_l2d2p365_osqp
 
-2) 'tl1_l2d2p365', components:
-    - tl1: 'tilted l1-norm,' also known as quantile cost function
-    - l2d2p365: small second order diffs (smooth) and 365-periodic
+2) 'tl1_l2d2p365', annual Fourier quantile fit compared to legacy Fourier fixtures.
 
     TESTS
     -----
     - test_tl1_l2d2p365_default
     - test_tl1_l2d2p365_idx_select
-    - test_tl1_l2d2p365_long_not_yearly_periodic
 
 3) 'l1_l1d1_l2d2p365', components:
     - l1: l1-norm
@@ -375,10 +372,10 @@ class TestSignalDecompositions(unittest.TestCase):
         expected_obj_val = output["expected_obj_val_365"]
 
         # Run test with default args
-        actual_s_seas, actual_problem = sd.tl1_l2d2p365(
-            signal, tau=0.8, solver=self.solver_convex, return_all=True
-        )
-        actual_obj_val = actual_problem.objective_value
+        result = sd.tl1_l2d2p365(signal, tau=0.8)
+        self.assertTrue(result.has_fit)
+        actual_s_seas = result.components["seasonal"]
+        actual_obj_val = result.diagnostics.objective_value
 
         mae_s_seas = mae(actual_s_seas, expected_s_seas)
 
@@ -416,64 +413,10 @@ class TestSignalDecompositions(unittest.TestCase):
         expected_obj_val = output["expected_obj_val_ixs"]
 
         # Run test
-        actual_s_seas, actual_problem = sd.tl1_l2d2p365(
-            signal,
-            tau=0.8,
-            solver=self.solver_convex,
-            use_ixs=indices,
-            return_all=True,
-        )
-        actual_obj_val = actual_problem.objective_value
-
-        mae_s_seas = mae(actual_s_seas, expected_s_seas)
-
-        self.assertLess(mae_s_seas, self.mae_threshold)
-        self.assertAlmostEqual(expected_obj_val, actual_obj_val, self.obj_tolerance)
-
-    @unittest.skip("Function no longer supported.")
-    def test_tl1_l2d2p365_long_not_yearly_periodic(self):
-        """Test with signal with len>365 and yearly_periodic set to True"""
-
-        # Load input and output data
-        filepath = Path(__file__).parent.parent
-        data_file_path = filepath / "fixtures" / "signal_decompositions"
-
-        input_path = (
-            str(data_file_path)
-            + "/"
-            + "test_tl1_l2d2p365_long_not_yearly_periodic_input.json"
-        )
-        output_path = (
-            str(data_file_path)
-            + "/"
-            + "test_tl1_l2d2p365_long_not_yearly_periodic_output.json"
-        )
-
-        # Load input
-        with open(input_path) as f:
-            input = json.load(f)
-
-        # Load output
-        with open(output_path) as f:
-            output = json.load(f)
-
-        # Raw signal
-        signal = np.array(input["test_signal"])
-
-        # Expected output
-        expected_s_seas = output["expected_s_seas_yearly_periodic"]
-        expected_obj_val = output["expected_obj_val_yearly_periodic"]
-
-        # Run test with default args
-        actual_s_seas, actual_problem = sd.tl1_l2d2p365(
-            signal,
-            tau=0.8,
-            solver=self.solver_convex,
-            w1=1e5,
-            yearly_periodic=False,
-            return_all=True,
-        )
-        actual_obj_val = actual_problem.objective_value
+        result = sd.tl1_l2d2p365(signal, tau=0.8, use_ixs=indices)
+        self.assertTrue(result.has_fit)
+        actual_s_seas = result.components["seasonal"]
+        actual_obj_val = result.diagnostics.objective_value
 
         mae_s_seas = mae(actual_s_seas, expected_s_seas)
 
@@ -558,15 +501,15 @@ class TestSignalDecompositions(unittest.TestCase):
         expected_obj_val = output["expected_obj_val"]
 
         # Run test with default args
-        actual_y_hat, actual_problem = sd.l2_l1d2_constrained(
-            signal, w1=5, solver=self.solver_convex, return_all=True
-        )
-        actual_obj_val = actual_problem.objective_value
+        result = sd.l2_l1d2_constrained(signal)
+        self.assertTrue(result.has_fit, result.diagnostics)
+        actual_y_hat = result.components["trend"]
+        actual_obj_val = result.diagnostics.objective_value
 
         mae_y_hat = mae(actual_y_hat, expected_y_hat)
 
         self.assertLess(mae_y_hat, self.mae_threshold)
-        self.assertAlmostEqual(expected_obj_val, actual_obj_val, self.obj_tolerance)
+        self.assertAlmostEqual(expected_obj_val, actual_obj_val, places=5)
 
 
 if __name__ == "__main__":

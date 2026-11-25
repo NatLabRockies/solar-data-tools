@@ -1,41 +1,39 @@
 name: Lint
+
 on:
   pull_request:
   workflow_dispatch:
   push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Install Python
+        id: python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install SDT
-        run: |
-          pip install -e ".[dev]"
-
       - name: Install pre-commit
-        run: pip install pre-commit
+        run: python -m pip install pre-commit==4.2.0
 
-      - name: List Python package versions
-        run: pip list
-
-      - name: Switch to a temporary branch
-        run: |
-          git checkout -b _ci_branch_
+      - name: Cache pre-commit hook environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.python-version }}-4.2.0-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Run pre-commit on all files
         env:
+          SKIP: no-commit-to-branch
           RUFF_OUTPUT_FORMAT: github
-        run: |
-          pre-commit run \
-            --show-diff-on-failure \
-            --color=always \
-            --all-files
+        run: pre-commit run --show-diff-on-failure --color=always --all-files

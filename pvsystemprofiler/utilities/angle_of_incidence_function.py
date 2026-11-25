@@ -57,10 +57,11 @@ def costheta_calc_helper(
         data_sampling = dh.data_sampling
     else:
         doy = np.arange(365) + 1
-        meas_per_day = int(1440 / data_sampling)
-        data_sampling = data_sampling
-    delta = delta_cooper(doy, meas_per_day)
-    omega = calculate_omega(doy, data_sampling, longitude, tz_offset)
+        meas_per_day = None
+    omega = calculate_omega(
+        doy, data_sampling, longitude, tz_offset, samples_per_day=meas_per_day
+    )
+    delta = delta_cooper(doy, omega.shape[0])
     # func_costheta uses the convention from Duffie and Beckman that zero is
     # due south, but the industry uses the 'meteorological' convention that
     # zero is north. This converts between the conventions

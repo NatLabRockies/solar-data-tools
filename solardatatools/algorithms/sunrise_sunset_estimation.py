@@ -21,24 +21,44 @@ Bennet Meyers, 7/2/20
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from solardatatools._tl1_l2d2p365 import _seasonal_component
 from solardatatools.daytime import detect_sun
-from solardatatools.sunrise_sunset import rise_set_rough, rise_set_smoothed
+from solardatatools.sunrise_sunset import _smooth_sunrise_sunset, rise_set_rough
 from solardatatools.signal_decompositions import tl1_l2d2p365
 
 
 class SunriseSunset:
     def __init__(self):
+        self.threshold = None
+        self.true_times = None
+        self.sunrise_tau = 0.1
+        self.sunset_tau = 0.9
+        self._clear_fit()
+
+    def _clear_fit(self):
         self.sunrise_estimates = None
         self.sunset_estimates = None
         self.sunrise_measurements = None
         self.sunset_measurements = None
         self.sunup_mask_measured = None
         self.sunup_mask_estimated = None
-        self.threshold = None
         self.total_rmse = None
-        self.true_times = None
-        self.sunrise_tau = 0.1
-        self.sunset_tau = 0.9
+        self.fit_warnings = ()
+
+    def _publish_fit(self, threshold, measured, smoothed, bool_msk, fit_warnings):
+        sunrise, sunset = smoothed["sunrises"], smoothed["sunsets"]
+        rows = bool_msk.shape[0]
+        hours = 24 * np.arange(rows)[:, None] / rows
+        estimated = (hours >= sunrise) & (hours < sunset)
+
+        self.sunrise_estimates = sunrise
+        self.sunset_estimates = sunset
+        self.sunrise_measurements = measured["sunrises"]
+        self.sunset_measurements = measured["sunsets"]
+        self.sunup_mask_measured = bool_msk
+        self.sunup_mask_estimated = estimated
+        self.threshold = threshold
+        self.fit_warnings = tuple(dict.fromkeys(fit_warnings))
 
     def calculate_times(
         self,
@@ -47,9 +67,11 @@ class SunriseSunset:
         plot=False,
         figsize=(12, 10),
         zoom_fit=False,
-        solver="OSQP",
+        solver="CLARABEL",
+        *,
+        solver_options=None,
     ):
-        # print('Calculating times')
+        self._clear_fit()
         if threshold is None:
             if self.threshold is not None:
                 threshold = self.threshold
@@ -64,26 +86,16 @@ class SunriseSunset:
             ss_true = None
         bool_msk = detect_sun(data, threshold)
         measured = rise_set_rough(bool_msk)
-        smoothed = rise_set_smoothed(
+        fit_warnings = []
+        smoothed = _smooth_sunrise_sunset(
             measured,
             sunrise_tau=self.sunrise_tau,
             sunset_tau=self.sunset_tau,
             solver=solver,
+            solver_options=solver_options,
+            fit_warnings=fit_warnings,
         )
-        self.sunrise_estimates = smoothed["sunrises"]
-        self.sunset_estimates = smoothed["sunsets"]
-        self.sunrise_measurements = measured["sunrises"]
-        self.sunset_measurements = measured["sunsets"]
-        self.sunup_mask_measured = bool_msk
-        data_sampling = int(24 * 60 / data.shape[0])
-        num_days = data.shape[1]
-        mat = np.tile(np.arange(0, 24, data_sampling / 60), (num_days, 1)).T
-        sr_broadcast = np.tile(self.sunrise_estimates, (data.shape[0], 1))
-        ss_broadcast = np.tile(self.sunset_estimates, (data.shape[0], 1))
-        self.sunup_mask_estimated = np.logical_and(
-            mat >= sr_broadcast, mat < ss_broadcast
-        )
-        self.threshold = threshold
+        self._publish_fit(threshold, measured, smoothed, bool_msk, fit_warnings)
 
         if plot:
             fig, ax = plt.subplots(nrows=4, figsize=figsize, sharex=True)
@@ -188,8 +200,12 @@ class SunriseSunset:
         search_pts=21,
         plot=False,
         figsize=(8, 6),
-        solver="OSQP",
+        solver="CLARABEL",
+        *,
+        solver_options=None,
     ):
+        self._clear_fit()
+        self.threshold = None
         if self.true_times is not None:
             sr_true = self.true_times["sunrise times"].values
             ss_true = self.true_times["sunset times"].values
@@ -199,6 +215,8 @@ class SunriseSunset:
         ths = np.logspace(-5, -1, search_pts)
         ho_error = []
         full_error = []
+        usable = []
+        fit_warnings = []
         for th in ths:
             bool_msk = detect_sun(data, th)
             measured = rise_set_rough(bool_msk)
@@ -207,8 +225,10 @@ class SunriseSunset:
             np.random.seed(random_seed)
             use_set_sr = np.arange(len(sunrises))[~np.isnan(sunrises)]
             use_set_ss = np.arange(len(sunsets))[~np.isnan(sunsets)]
+            usable.append(bool(use_set_sr.size and use_set_ss.size))
             if (
-                len(use_set_sr) / len(sunrises) > 0.6
+                min(len(use_set_sr), len(use_set_ss)) >= 2
+                and len(use_set_sr) / len(sunrises) > 0.6
                 and len(use_set_ss) / len(sunsets) > 0.6
             ):
                 run_ho_errors = []
@@ -231,11 +251,25 @@ class SunriseSunset:
                     test_msk_ss = np.zeros_like(sunsets, dtype=bool)
                     test_msk_sr[test_sr] = True
                     test_msk_ss[test_ss] = True
-                    sr_smoothed = tl1_l2d2p365(
-                        sunrises, train_msk_sr, tau=self.sunrise_tau, solver=solver
+                    sunrise_fit = tl1_l2d2p365(
+                        sunrises,
+                        use_ixs=train_msk_sr,
+                        tau=self.sunrise_tau,
+                        solver=solver,
+                        solver_options=solver_options,
                     )
-                    ss_smoothed = tl1_l2d2p365(
-                        sunsets, train_msk_ss, tau=self.sunset_tau, solver=solver
+                    sunset_fit = tl1_l2d2p365(
+                        sunsets,
+                        use_ixs=train_msk_ss,
+                        tau=self.sunset_tau,
+                        solver=solver,
+                        solver_options=solver_options,
+                    )
+                    sr_smoothed = _seasonal_component(
+                        sunrise_fit, "sunrise holdout", fit_warnings
+                    )
+                    ss_smoothed = _seasonal_component(
+                        sunset_fit, "sunset holdout", fit_warnings
                     )
                     r1 = (sunrises - sr_smoothed)[test_msk_sr]
                     r2 = (sunsets - ss_smoothed)[test_msk_ss]
@@ -264,11 +298,12 @@ class SunriseSunset:
                         run_ho_errors.append(1e2)
                 ho_error.append(np.average(run_ho_errors))
                 if self.true_times is not None:
-                    full_fit = rise_set_smoothed(
+                    full_fit = _smooth_sunrise_sunset(
                         measured,
                         sunrise_tau=self.sunrise_tau,
                         sunset_tau=self.sunset_tau,
                         solver=solver,
+                        solver_options=solver_options,
                     )
                     sr_full = full_fit["sunrises"]
                     ss_full = full_fit["sunsets"]
@@ -280,38 +315,31 @@ class SunriseSunset:
                 ho_error.append(1e2)
                 full_error.append(1e2)
         ho_error = np.array(ho_error)
-        min_val = np.min(ho_error)
-        slct_vals = ho_error < 1.1 * min_val  # everything within 10% of min val
+        usable = np.asarray(usable, dtype=bool)
+        if not usable.any():
+            raise ValueError(
+                "No admitted observations. No candidate threshold provided both daylight boundaries."
+            )
+        min_val = np.min(ho_error[usable])
+        slct_vals = usable & (ho_error <= 1.1 * min_val)
         selected_th = np.min(ths[slct_vals])
         bool_msk = detect_sun(data, selected_th)
         measured = rise_set_rough(bool_msk)
-        smoothed = rise_set_smoothed(
+        smoothed = _smooth_sunrise_sunset(
             measured,
             sunrise_tau=self.sunrise_tau,
             sunset_tau=self.sunset_tau,
             solver=solver,
+            solver_options=solver_options,
+            fit_warnings=fit_warnings,
         )
-        self.sunrise_estimates = smoothed["sunrises"]
-        self.sunset_estimates = smoothed["sunsets"]
-        self.sunrise_measurements = measured["sunrises"]
-        self.sunset_measurements = measured["sunsets"]
-        self.sunup_mask_measured = bool_msk
-        data_sampling = int(24 * 60 / data.shape[0])
-        num_days = data.shape[1]
-        mat = np.tile(np.arange(0, 24, data_sampling / 60), (num_days, 1)).T
-        sr_broadcast = np.tile(self.sunrise_estimates, (data.shape[0], 1))
-        ss_broadcast = np.tile(self.sunset_estimates, (data.shape[0], 1))
-        self.sunup_mask_estimated = np.logical_and(
-            mat >= sr_broadcast, mat < ss_broadcast
-        )
-        self.threshold = selected_th
+        total_rmse = None
         if self.true_times is not None:
-            sr_residual = sr_true - self.sunrise_estimates
-            ss_residual = ss_true - self.sunset_estimates
+            sr_residual = sr_true - smoothed["sunrises"]
+            ss_residual = ss_true - smoothed["sunsets"]
             total_rmse = np.sqrt(np.mean(np.r_[sr_residual, ss_residual] ** 2))
-            self.total_rmse = total_rmse
-        else:
-            self.total_rmse = None
+        self._publish_fit(selected_th, measured, smoothed, bool_msk, fit_warnings)
+        self.total_rmse = total_rmse
 
         if plot:
             fig = plt.figure(figsize=figsize)

@@ -8,22 +8,31 @@ import numpy as np
 import cvxpy as cvx
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
-from solardatatools.signal_decompositions import l2_l1d2_constrained
+from solardatatools._l2_l1d2_constrained import (
+    _L2L1D2ConstrainedWorkspace,
+    _validate_signal,
+)
 
 
 class ClippingDetection:
     def __init__(self):
-        # these are the attributes most users will be interested in
-        self.inverter_clipping = None  # T/F any clipping?
-        self.clipping_mask = None  # Boolean mask of clipped entries
-        self.num_clip_points = None  # How many clipping set points
-        # these are data and intermediate calculations used by the class methods
+        self._filter_workspace = None
         self.data = None
-        self.num_clip_points = None
         self.num_days = None
         self.num_rows = None
         self.max_value = None
         self.daily_max_val = None
+        self._clear_detection()
+
+    def __getstate__(self):
+        # Dask may serialize the detector between stages. Rebuild the private
+        # workspace on demand because native solver objects cannot be pickled.
+        return {**self.__dict__, "_filter_workspace": None}
+
+    def _clear_detection(self):
+        self.inverter_clipping = None
+        self.clipping_mask = None
+        self.num_clip_points = None
         self.clip_stat_1 = None
         self.clip_stat_2 = None
         self.clipped_days = None
@@ -32,6 +41,7 @@ class ClippingDetection:
         self.cdf_y = None
         self.y_hat = None
         self.y_param = None
+        self.fit_result = None
         self.weight = None
         self.metric = None
         self.point_masses = None
@@ -45,7 +55,10 @@ class ClippingDetection:
         solver=None,
         verbose=False,
         weight=5,
+        *,
+        solver_options=None,
     ):
+        self._clear_detection()
         self.num_days = data_matrix.shape[1]
         self.num_rows = data_matrix.shape[0]
         self.data = data_matrix
@@ -78,7 +91,10 @@ class ClippingDetection:
             solver=solver,
             verbose=verbose,
             weight=weight,
+            solver_options=solver_options,
         )
+        if not self.fit_result.has_fit:
+            return
         pm_neighborhood_threshold = 0.0075
         try:
             if len(self.point_masses) == 0:
@@ -107,7 +123,9 @@ class ClippingDetection:
         return
 
     def find_clipped_times(self):
-        if self.inverter_clipping:
+        if self.inverter_clipping is None:
+            self.clipping_mask = None
+        elif self.inverter_clipping:
             max_value = self.max_value
             daily_max_val = self.daily_max_val
             point_masses = self.point_mass_locations
@@ -128,18 +146,30 @@ class ClippingDetection:
             self.clipping_mask = np.zeros((self.num_rows, self.num_days), dtype=bool)
 
     def pointmass_detection(
-        self, data, threshold=-0.35, solver=None, verbose=False, weight=5
+        self,
+        data,
+        threshold=-0.35,
+        solver=None,
+        verbose=False,
+        weight=5,
+        *,
+        solver_options=None,
     ):
-        self.threshold = threshold
+        self._clear_detection()
         x_rs, y_rs = self.calculate_cdf(data)
+        # Fit statistical model to resampled CDF that has sparse 2nd order difference
+        self.get_l2_l1d2(
+            y_rs,
+            weight=weight,
+            solver=solver,
+            verbose=verbose,
+            solver_options=solver_options,
+        )
+        self.threshold = threshold
         self.cdf_x = x_rs
         self.cdf_y = y_rs
-        # Fit statistical model to resampled CDF that has sparse 2nd order difference
-        if self.y_param is None:
-            self.get_l2_l1d2(y_rs, weight=weight, solver=solver)
-        else:
-            self.y_param = y_rs
-            self.weight = weight
+        if not self.fit_result.has_fit:
+            return
 
         y_hat = self.y_hat
         # Look for outliers in the 2nd order difference to identify point masses from clipping
@@ -196,6 +226,39 @@ class ClippingDetection:
         self.metric = metric
         self.point_masses = point_masses
         self.point_mass_locations = point_mass_values
+
+    @staticmethod
+    def _plot_scores(
+        xs, clip_stat_1, clip_stat_2, clipped_days, inverter_clipping, figsize
+    ):
+        """Render clipping scores and flags from the caller’s result snapshot."""
+        fig, ax = plt.subplots(nrows=2, figsize=figsize, sharex=True)
+        ax[0].plot(xs, clip_stat_1)
+        ax[1].plot(xs, clip_stat_2)
+        if inverter_clipping:
+            ax[0].plot(
+                xs[clipped_days],
+                clip_stat_1[clipped_days],
+                ls="none",
+                marker=".",
+                color="red",
+                label="days with inverter clipping",
+            )
+            ax[1].plot(
+                xs[clipped_days],
+                clip_stat_2[clipped_days],
+                ls="none",
+                marker=".",
+                color="red",
+            )
+            ax[0].legend()
+        ax[0].set_title("Clipping Score 1: ratio of daily max to overal max")
+        ax[1].set_title(
+            "Clipping Score 2: fraction of daily energy generated at daily max power"
+        )
+        ax[1].set_xlabel("Date")
+        plt.gcf().autofmt_xdate()
+        return fig
 
     def plot_cdf(self, figsize=(8, 6)):
         x_rs = self.cdf_x
@@ -369,9 +432,22 @@ class ClippingDetection:
         y_rs = f(x_rs)
         return x_rs, y_rs
 
-    def get_l2_l1d2(self, y, weight=5, solver=None):
-        out = l2_l1d2_constrained(y, w1=weight, solver=solver)
-
-        self.y_param = out[0]
-        self.y_hat = out[1]
-        self.weight = out[2]
+    def get_l2_l1d2(
+        self, y, weight=5, solver=None, *, solver_options=None, verbose=False
+    ):
+        self._clear_detection()
+        y = _validate_signal(y)
+        workspace = getattr(self, "_filter_workspace", None)
+        if workspace is None or workspace.size != y.size:
+            workspace = self._filter_workspace = _L2L1D2ConstrainedWorkspace(y.size)
+        self.fit_result = workspace.solve(
+            y,
+            w1=weight,
+            solver=solver,
+            solver_options=solver_options,
+            verbose=verbose,
+        )
+        if self.fit_result.has_fit:
+            self.y_hat = self.fit_result.components["trend"]
+            self.y_param = y.copy()
+            self.weight = weight

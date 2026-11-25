@@ -19,17 +19,7 @@ This module contains tests for the following signal decompositions:
     - test_cvx_l2_l1d1_l2d2p365_idx_select
     - test_cvx_l2_l1d1_l2d2p365_yearly_periodic
 
-2) '_cvx_tl1_l2d2p365', components:
-    - tl1: 'tilted l1-norm,' also known as quantile cost function
-    - l2d2p365: small second order diffs (smooth) and 365-periodic
-
-    TESTS
-    -----
-    - test_cvx_tl1_l2d2p365_default
-    - test_cvx_tl1_l2d2p365_idx_select
-    - test_cvx_tl1_l2d2p365_long_not_yearly_periodic
-
-3) '_cvx_l1_l1d1_l2d2p365', components:
+2) '_cvx_l1_l1d1_l2d2p365', components:
     - l1: l1-norm
     - l1d1: piecewise constant heuristic, l1-norm of first order differences
     - l2d2p365: small second order diffs (smooth) and 365-periodic
@@ -39,7 +29,7 @@ This module contains tests for the following signal decompositions:
     - test_cvx_l1_l1d1_l2d2p365_default
     - test_cvx_l1_l1d1_l2d2p365_idx_select
 
-4) '_cvx_l2_l1d2_constrained':
+3) Public 'l2_l1d2_constrained', compared to the legacy MOSEK fixture at w1=10:
 
     TESTS
     -----
@@ -53,6 +43,7 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error as mae
 
 from solardatatools import _cvx_signal_decompositions as sd
+from solardatatools.signal_decompositions import l2_l1d2_constrained
 
 
 class TestSignalDecompositions(unittest.TestCase):
@@ -390,157 +381,6 @@ class TestSignalDecompositions(unittest.TestCase):
         self.assertLess(mae_s_seas, self.mae_threshold)
         self.assertAlmostEqual(expected_obj_val, actual_obj_val, self.obj_tolerance)
 
-    ###################
-    # _cvx_tl1_l2d2p365
-    ###################
-
-    def test_cvx_tl1_l2d2p365_default(self):
-        """Test with default args"""
-
-        # Load input and output data
-        filepath = Path(__file__).parent.parent
-        data_file_path = (
-            filepath
-            / "fixtures"
-            / "signal_decompositions"
-            / "_cvx_signal_decompositions"
-        )
-
-        input_path = (
-            str(data_file_path) + "/" + "test_cvx_tl1_l2d2p365_default_input.json"
-        )
-        output_path = (
-            str(data_file_path) + "/" + "test_cvx_tl1_l2d2p365_default_output.json"
-        )
-
-        # Load input
-        with open(input_path) as f:
-            input = json.load(f)
-
-        # Load output
-        with open(output_path) as f:
-            output = json.load(f)
-
-        # Input
-        signal = np.array(input["test_signal"])
-
-        # Expected output
-        expected_s_seas = output["expected_s_seas_mosek_365"]
-        expected_obj_val = output["expected_obj_val_mosek_365"]
-
-        # Run test with default args
-        actual_s_seas, actual_obj_val = sd._cvx_tl1_l2d2p365(
-            signal, tau=0.8, w1=1e5, solver=self.cvxpy_solver, return_all=True
-        )
-
-        mae_s_seas = mae(actual_s_seas, expected_s_seas)
-
-        self.assertLess(mae_s_seas, self.mae_threshold)
-        self.assertAlmostEqual(expected_obj_val, actual_obj_val, self.obj_tolerance)
-
-    def test_cvx_tl1_l2d2p365_idx_select(self):
-        """Test with select indices"""
-
-        # Load input and output data
-        filepath = Path(__file__).parent.parent
-        data_file_path = (
-            filepath
-            / "fixtures"
-            / "signal_decompositions"
-            / "_cvx_signal_decompositions"
-        )
-
-        input_path = (
-            str(data_file_path) + "/" + "test_cvx_tl1_l2d2p365_idx_select_input.json"
-        )
-        output_path = (
-            str(data_file_path) + "/" + "test_cvx_tl1_l2d2p365_idx_select_output.json"
-        )
-
-        # Load input
-        with open(input_path) as f:
-            input = json.load(f)
-
-        # Load output
-        with open(output_path) as f:
-            output = json.load(f)
-
-        # Input
-        signal = np.array(input["test_signal"])
-        indices = input["indices"]
-
-        # Expected output
-        expected_s_seas = output["expected_s_seas_mosek_ixs"]
-        expected_obj_val = output["expected_obj_val_mosek_ixs"]
-
-        # Run test
-        actual_s_seas, actual_obj_val = sd._cvx_tl1_l2d2p365(
-            signal,
-            tau=0.8,
-            w1=1e5,
-            solver=self.cvxpy_solver,
-            use_ixs=indices,
-            return_all=True,
-        )
-
-        mae_s_seas = mae(actual_s_seas, expected_s_seas)
-
-        self.assertLess(mae_s_seas, self.mae_threshold)
-        self.assertAlmostEqual(expected_obj_val, actual_obj_val, self.obj_tolerance)
-
-    def test_cxv_tl1_l2d2p365_long_not_yearly_periodic(self):
-        """Test with signal with len>365 and yearly_periodic set to True"""
-
-        # Load input and output data
-        filepath = Path(__file__).parent.parent
-        data_file_path = (
-            filepath
-            / "fixtures"
-            / "signal_decompositions"
-            / "_cvx_signal_decompositions"
-        )
-
-        input_path = (
-            str(data_file_path)
-            + "/"
-            + "test_cvx_tl1_l2d2p365_long_not_yearly_periodic_input.json"
-        )
-        output_path = (
-            str(data_file_path)
-            + "/"
-            + "test_cvx_tl1_l2d2p365_long_not_yearly_periodic_output.json"
-        )
-
-        # Load input
-        with open(input_path) as f:
-            input = json.load(f)
-
-        # Load output
-        with open(output_path) as f:
-            output = json.load(f)
-
-        # Raw signal
-        signal = np.array(input["test_signal"])
-
-        # Expected output
-        expected_s_seas = output["expected_s_seas_mosek_yearly_periodic"]
-        expected_obj_val = output["expected_obj_val_mosek_yearly_periodic"]
-
-        # Run test with default args
-        actual_s_seas, actual_obj_val = sd._cvx_tl1_l2d2p365(
-            signal,
-            tau=0.8,
-            solver=self.cvxpy_solver,
-            w1=1e5,
-            yearly_periodic=False,
-            return_all=True,
-        )
-
-        mae_s_seas = mae(actual_s_seas, expected_s_seas)
-
-        self.assertLess(mae_s_seas, self.mae_threshold)
-        self.assertAlmostEqual(expected_obj_val, actual_obj_val, self.obj_tolerance)
-
     #######################
     # _cvx_l1_l1d1_l2d2p365
     #######################
@@ -635,9 +475,10 @@ class TestSignalDecompositions(unittest.TestCase):
         expected_obj_val = output["expected_obj_val_mosek"]
 
         # Run test with default args
-        actual_y_hat, actual_obj_val = sd._cvx_l2_l1d2_constrained(
-            signal, w1=1e1, solver=self.cvxpy_solver, return_all=True
-        )
+        result = l2_l1d2_constrained(signal, w1=10)
+        self.assertTrue(result.has_fit, result.diagnostics)
+        actual_y_hat = result.components["trend"]
+        actual_obj_val = result.diagnostics.objective_value
 
         mae_y_hat = mae(actual_y_hat, expected_y_hat)
 

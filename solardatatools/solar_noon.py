@@ -28,8 +28,8 @@ def energy_com(data):
     """
     data = np.copy(data)
     data[np.isnan(data)] = 0
-    num_meas_per_hour = data.shape[0] / 24
-    x = np.arange(0, 24, 1.0 / num_meas_per_hour)
+    rows = data.shape[0]
+    x = 24 * np.arange(rows) / rows
     div1 = np.dot(x, data)
     div2 = np.sum(data, axis=0)
     com = np.empty_like(div1)

@@ -8,19 +8,10 @@ This module contains standardized signal decomposition models for use in the SDT
    - `l1d1`: Piecewise constant heuristic, l1-norm of first-order differences
    - `l2d2p365`: Small second-order differences (smooth) and 365-periodic
 
-2. `_cvx_tl1_l2d2p365`: Similar to (2), estimating a smooth, seasonal component with an asymmetric Laplacian noise model, fitting a local quantile instead of a local average
-   - `tl1`: 'Tilted l1-norm,' also known as quantile cost function
-   - `l2d2p365`: Small second-order differences (smooth) and 365-periodic
-
-3. `_cvx_l1_l1d1_l2d2p365`: Like (1) but with an asymmetric residual cost instead of Gaussian residuals
+2. `_cvx_l1_l1d1_l2d2p365`: Like (1) but with an asymmetric residual cost instead of Gaussian residuals
    - `l1`: l1-norm
    - `l1d1`: Piecewise constant heuristic, l1-norm of first-order differences
    - `l2d2p365`: Small second-order differences (smooth) and 365-periodic
-
-4. `_cvx_l2_l1d2_constrained`:
-   - `l2`: Gaussian noise, sum-of-squares small or l2-norm squared
-   - `l1d2`: Piecewise linear heuristic
-   - Constrained to have first value at 0 and last value at 1
 
 """
 
@@ -135,61 +126,6 @@ def _cvx_l2_l1d1_l2d2p365(
     return s_hat.value, s_seas.value
 
 
-def _cvx_tl1_l2d2p365(
-    signal,
-    use_ixs=None,
-    tau=0.75,  # passed as 0.05/0.1 (sunrise), 0.95/0.9 (sunset)
-    w0=1,
-    w1=500,
-    yearly_periodic=True,
-    return_all=False,
-    solver="MOSEK",
-    verbose=False,
-):
-    """
-    Used in:
-        solardatatools/algorithms/sunrise_sunset_estimation.py
-        solardatatools/clear_day_detection.py
-        solardatatools/data_quality.py
-        solardatatools/sunrise_sunset.py
-
-    :param signal: A 1d numpy array (must support boolean indexing) containing
-        the signal of interest
-    :param use_ixs: List of booleans indicating indices to use in signal.
-        None is default (uses the entire signal).
-    :param tau: Quantile regression parameter,between zero and one, and it sets
-        the approximate quantile of the residual distribution that the model is fit to
-        See: https://colab.research.google.com/github/cvxgrp/cvx_short_course/blob/master/applications/quantile_regression.ipynb
-    :param w0: Weight on the residual component
-    :param w1: The regularization parameter to control the smoothness of the
-        seasonal signal
-    :param yearly_periodic: Adds periodicity constraint to signal decomposition
-    :param return_all: Returns all components and the objective value. Used for tests.
-    :param solver: Solver to use for the decomposition
-    :param verbose: Sets verbosity
-    :return: A tuple with three 1d numpy arrays containing the three signal component estimates
-    """
-    if use_ixs is None:
-        use_ixs = ~np.isnan(signal)
-    x = cvx.Variable(len(signal))
-    r = signal[use_ixs] - x[use_ixs]
-    objective = cvx.Minimize(
-        w0 * cvx.sum(0.5 * cvx.abs(r) + (tau - 0.5) * r)
-        + w1 * cvx.sum_squares(cvx.diff(x, k=2))
-    )
-    if len(signal) > 365 and yearly_periodic:
-        constraints = [x[365:] == x[:-365]]
-    else:
-        constraints = []
-    problem = cvx.Problem(objective, constraints=constraints)
-    problem.solve(solver=solver, verbose=verbose)
-
-    if return_all:
-        return x.value, problem.objective.value
-
-    return x.value
-
-
 def _cvx_l1_pwc_smoothper_trend(
     signal,
     use_ixs=None,
@@ -286,39 +222,3 @@ def make_l1_pwc_smoothper_trend_problem(metric, w2, w3, w4, tv_weights=None):
     ]
     problem = cvx.Problem(cvx.Minimize(cost), constraints)
     return problem, tv_weights_param
-
-
-def _cvx_l2_l1d2_constrained(
-    signal, w1=1e1, return_all=False, solver="MOSEK", verbose=False
-):
-    """
-    Used in solardatatools/algorithms/clipping.py
-
-    This is a convex problem and the default solver across SDT is OSQP.
-
-    :param signal: A 1d numpy array (must support boolean indexing) containing
-        the signal of interest
-    :param w0: Weight on the residual component
-    :param w1: The regularization parameter on l1d2 component
-    :param return_all: Returns all components and the objective value. Used for tests.
-    :param solver: Solver to use for the decomposition
-    :param verbose: Sets verbosity
-    :return: A tuple with returning the signal, the l1d2 component estimate, and the weight
-    """
-    use_ixs = ~np.isnan(signal)
-
-    y_hat = cvx.Variable(len(signal))
-    mu = cvx.Parameter(nonneg=True)
-    mu.value = w1
-    error = cvx.sum_squares(signal[use_ixs] - y_hat[use_ixs])
-    reg = cvx.norm(cvx.diff(y_hat, k=2), p=1)
-
-    objective = cvx.Minimize(error + mu * reg)
-    constraints = [y_hat[0] == 0, y_hat[-1] == 1]
-    problem = cvx.Problem(objective, constraints)
-    problem.solve(solver=solver, verbose=verbose)
-
-    if return_all:
-        return y_hat.value, problem.objective.value
-
-    return signal, y_hat.value, mu.value

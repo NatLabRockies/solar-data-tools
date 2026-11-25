@@ -88,3 +88,7 @@ Homepage = "https://github.com/NatLabRockies/solar-data-tools"
 Documentation = "https://solar-data-tools.readthedocs.io/"
 "Bug Tracker" = "https://github.com/NatLabRockies/solar-data-tools/issues"
 Discussions = "https://github.com/NatLabRockies/solar-data-tools/discussions"
+
+[tool.coverage.run]
+# Include unexecuted files when the base suite skips an optional package.
+source_dirs = ["solardatatools", "pvsystemprofiler", "anomalydetector", "sdt_dask"]

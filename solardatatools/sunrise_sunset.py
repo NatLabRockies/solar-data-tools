@@ -5,13 +5,13 @@ unlabel PV power dataset.
 """
 
 import numpy as np
+from solardatatools._tl1_l2d2p365 import _seasonal_component
 from solardatatools.signal_decompositions import tl1_l2d2p365
 
 
 def rise_set_rough(bool_msk):
     nvals = bool_msk.shape[0]
-    num_meas_per_hour = nvals / 24
-    hour_of_day = np.arange(0, 24, 1.0 / num_meas_per_hour)
+    hour_of_day = 24 * np.arange(nvals) / nvals
     sunrise_idxs = np.argmax(bool_msk, axis=0)
     sunset_idxs = nvals - np.argmax(np.flip(bool_msk, axis=0), axis=0) - 1
     sunrises = np.nan * np.ones_like(sunrise_idxs)
@@ -27,14 +27,27 @@ def rise_set_rough(bool_msk):
     return {"sunrises": sunrises, "sunsets": sunsets}
 
 
-def rise_set_smoothed(rough_dict, sunrise_tau=0.1, sunset_tau=0.9, solver=None):
+def rise_set_smoothed(
+    rough_dict, sunrise_tau=0.1, sunset_tau=0.9, solver=None, *, solver_options=None
+):
+    return _smooth_sunrise_sunset(
+        rough_dict, sunrise_tau, sunset_tau, solver, solver_options
+    )
+
+
+def _smooth_sunrise_sunset(
+    rough_dict, sunrise_tau, sunset_tau, solver, solver_options, fit_warnings=None
+):
     sunrises = rough_dict["sunrises"]
     sunsets = rough_dict["sunsets"]
 
-    sr_smoothed = tl1_l2d2p365(
-        sunrises, ~np.isnan(sunrises), tau=sunrise_tau, solver=solver
+    sunrise_fit = tl1_l2d2p365(
+        sunrises, tau=sunrise_tau, solver=solver, solver_options=solver_options
     )
-    ss_smoothed = tl1_l2d2p365(
-        sunsets, ~np.isnan(sunsets), tau=sunset_tau, solver=solver
+    sunset_fit = tl1_l2d2p365(
+        sunsets, tau=sunset_tau, solver=solver, solver_options=solver_options
     )
-    return {"sunrises": sr_smoothed, "sunsets": ss_smoothed}
+    return {
+        "sunrises": _seasonal_component(sunrise_fit, "sunrise", fit_warnings),
+        "sunsets": _seasonal_component(sunset_fit, "sunset", fit_warnings),
+    }
