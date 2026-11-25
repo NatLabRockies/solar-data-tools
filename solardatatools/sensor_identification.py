@@ -40,7 +40,7 @@ class SensorIdentification:
             return
         self.coverage_scores = self.data_handler.extra_quality_scores
         nan_masks = [~np.isnan(m[1]) for m in self.data_handler.extra_matrices.items()]
-        self.compare_mask = np.alltrue(np.array(nan_masks), axis=0)
+        self.compare_mask = np.all(np.array(nan_masks), axis=0)
         # These attributes are set when running the identify method
         self.results_table = None
         self.chosen_sensor = None
@@ -74,10 +74,13 @@ class SensorIdentification:
         for filter_key, filter in filters.items():
             mask = np.zeros_like(self.compare_mask, dtype=bool)
             mask[:, filter] = self.compare_mask[:, filter]
-            # Form (x, y) data
-            y = self.data_handler.filled_data_matrix[mask]
+            # Read each day in order before splitting by sample.
+            chronological_mask = mask.ravel(order="F")
+            y = self.data_handler.filled_data_matrix.ravel(order="F")[
+                chronological_mask
+            ]
             Xs = {
-                key: matrix[mask].reshape(-1, 1)
+                key: matrix.ravel(order="F")[chronological_mask].reshape(-1, 1)
                 for key, matrix in self.data_handler.extra_matrices.items()
             }
 

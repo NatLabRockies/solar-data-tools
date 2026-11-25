@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-24, QUALITY-02 completion and QUALITY-03/QUALITY-01 checkpoint
+- Last revised: 2026-11-24, SENSOR-01 implementation and verification
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -96,12 +96,18 @@ their recorded verification requirements remain unchanged.
 
 ### Latest completion status (2026-11-24)
 
+QUALITY-01 and QUALITY-03 are complete on `cleanup` in `856dbb9`.
+The dataset quality score now returns the fraction of all day columns
+that pass, counting unavailable days as failures. The revised QUALITY-01
+checkpoint recorded 171 tests passed and two skipped. The API docstring
+and user guide document the historical modal scorer's unit dependence
+and show how to select the straight-ramp scorer. See Section 9.
+
 QUALITY-02 is complete on `cleanup` in `8bdae17`. The committed diff and
 new regression test file match the independently reviewed hashes. The
 review recorded 152 tests passed, two skipped, and all 98 Oahu
 day-and-cadence cases passing the new linearity check. The original data
-from the reporter in #235 remains unavailable. QUALITY-03 tracks the
-historical modal scorer's sensitivity to input units. See Section 9.
+from the reporter in #235 remains unavailable. See Section 9.
 
 The bounded SD-07 workaround for the native constrained filter and clipping
 caller was committed in `f6560a4`. The default quadratic CLARABEL path uses
@@ -938,7 +944,8 @@ the other physical-time conversions; no duplicate correction is intended here.
 
 #### QUALITY-01 — The default dataset score is not the documented passing fraction [P2]
 
-- **Status, 2026-11-24:** implemented in the working tree for review.
+- **Status, 2026-11-24:** complete on `cleanup` in `856dbb9`. The revised
+  checkpoint recorded 171 tests passed and two skipped. See Section 9.
 - **Location:** `dataset_quality_score` and `make_density_scores`.
 - **Finding:** with `good_days=None` and the default `use_advanced=True`, the
   previous function averaged continuous density-to-baseline ratios, which can
@@ -1004,10 +1011,11 @@ the other physical-time conversions; no duplicate correction is intended here.
 
 #### QUALITY-03 — Equivalent power units can change historical linearity scores and flags [P2]
 
-- **Disposition, 2026-11-24:** preserve the historical three-argument modal
-  scorer for reproducibility. Document its unit dependence in the API
-  reference and user guide, and direct users to the straight-ramp scorer
-  with `sampling_interval` and `daylight_mask`.
+- **Status, 2026-11-24:** complete on `cleanup` in `856dbb9`. The API
+  docstring and user guide document the unit dependence of the historical
+  three-argument modal scorer, retained for reproducibility. They direct
+  callers to the straight-ramp scorer with `sampling_interval` and
+  `daylight_mask`.
 - **Finding:** the modal scorer rounds adjacent differences to four decimal
   places in the input units. A step of `0.0001` in kW corresponds to `0.1` W,
   so unit conversion can change which differences count as repeats. On the
@@ -1023,19 +1031,22 @@ the other physical-time conversions; no duplicate correction is intended here.
 
 #### SENSOR-01 — Temporal validation receives time-of-day-major ordering [P2]
 
-- **Location:** `SensorIdentification.identify`, approximately lines 78–88.
-- **Finding:** two-dimensional Boolean indexing traverses the daily matrix in
-  row-major order: all dates at one time of day precede the next time of day.
-  `TimeSeriesSplit` therefore allows later observations into training before
-  earlier observations in validation. The reported errors and sensor ranking do
-  not represent the intended chronological validation.
-- **Proposed correction:** flatten the common mask, response, and each sensor
-  matrix with `order="F"` before applying the mask, or explicitly order by the
-  corresponding timestamps.
-- **Proposed verification:** multiple dates and missing sensor observations;
-  recover timestamps for every partition and verify
-  $\max t_{\mathrm{train}} < \min t_{\mathrm{validation}}$.
-- **Related:** PKG-01 covers the separate `np.alltrue` compatibility failure.
+- **Status, 2026-11-24:** implemented and verified locally on `cleanup`.
+- **Location:** `SensorIdentification.__init__` and `SensorIdentification.identify`.
+- **Finding:** two-dimensional Boolean indexing traversed the daily matrix
+  in row-major order. All dates at one time of day preceded the next time
+  of day, so `TimeSeriesSplit` could train on observations later than its
+  validation observations.
+- **Owner decision, 2026-11-24:** retain sample-level splits in timestamp
+  order, including fold boundaries within a day. Include the sensor
+  constructor's `np.alltrue` replacement from PKG-01 as a prerequisite.
+- **Implementation:** flatten the common mask, response, and each sensor
+  matrix with `order="F"` before indexing. The constructor uses `np.all`.
+- **Verification:** a synthetic regression recovers timestamps with missing
+  sensor readings and verifies strict chronology in all 12 folds:
+  $\max t_{\mathrm{train}} < \min t_{\mathrm{validation}}$. It also checks
+  the common retained observations, an intra-day boundary, and aligned
+  regression inputs. See Section 9.
 
 #### SENSOR-02 — Unavailable subsets and failed folds break sensor identification [P2]
 
@@ -3945,8 +3956,9 @@ The missing `boto3` installation dependency is tracked under PKG-02.
   validation with the supported Python and dependency combinations.
 - **Revised disposition:** `np.concat` is valid in the selected NumPy major
   version and no longer constitutes a compatibility defect. Replacing it with
-  `np.concatenate` is not required by this issue. The removed `np.alltrue` and
-  `np.float` uses still require correction.
+  `np.concatenate` is not required by this issue. The local SENSOR-01
+  checkpoint includes the sensor constructor's `np.alltrue` replacement.
+  Calls to the remaining removed APIs still require correction.
 - **Proposed correction:** use `np.all` and `float`; narrow KML exception handling
   and report when no usable polygons remain. Declare the validated NumPy 2.x
   range and document retirement of 1.x support. Reconcile the Dask extra's
@@ -6230,17 +6242,20 @@ register.
   the independently reviewed hashes. The review recorded 152 tests passed,
   two skipped, and all 98 Oahu day-and-cadence cases passing the new check.
 
-### 2026-11-24 — QUALITY-03 compatibility disposition
+### 2026-11-24 — QUALITY-03 completion
 
-- **Compatibility:** keep the three-argument modal scorer for reproducibility
-  and document that converting units can change its scores and sample mask.
-  Recommend the production straight-ramp call for direct users.
+- **Completion:** `856dbb9` on `cleanup` documents that converting units can
+  change the three-argument modal scorer's scores and sample mask. The API
+  docstring and user guide direct callers to the straight-ramp API. The
+  historical call remains available for reproducibility.
 - **Evidence:** the one-second W/m² and kW/m² comparisons in both recorded
   Oahu weeks agreed for the production scorer. Its synthetic W/kW comparison
   and the historical compatibility fixture provide regression coverage.
 
-### 2026-11-24 — QUALITY-01 density scoring checkpoint
+### 2026-11-24 — QUALITY-01 completion
 
+- **Completion:** `856dbb9` on `cleanup` contains the revised dataset quality
+  score, its regression tests, and user guide documentation.
 - **Aggregation:** count passing density flags over all day columns. The
   advanced check uses the existing strict acceptance bounds. The simple
   check uses the caller's daily density threshold, and a supplied Boolean
@@ -6258,3 +6273,18 @@ register.
   readings, and masked decisions. The revision adds regressions for all three.
   The full suite for the revised checkpoint passed with 171 tests and two
   skips in the same environment.
+
+### 2026-11-24 — SENSOR-01 implementation and verification
+
+- **Scope:** chronological sample-level validation, with fold boundaries
+  allowed within a day. The owner authorized the constructor's `np.alltrue`
+  replacement because NumPy 2.4.2 blocks construction before validation.
+- **Regression:** six days at six-hour cadence, two sensors with different
+  missing samples, and two folds for each sensor and each day filter. With
+  the constructor fixed and the original traversal, one fold trained through
+  January 5 at 00:00 and validated from January 2 at 06:00. The corrected
+  traversal passed all 12 partition checks and the checks for shared sample
+  coverage and predictor/response alignment.
+- **Verification:** 172 tests passed and two skipped with Python 3.13.11,
+  NumPy 2.4.2, scikit-learn 1.8.0, and CVXPY 1.8.1. Ruff lint and format
+  checks passed for both changed Python files.
