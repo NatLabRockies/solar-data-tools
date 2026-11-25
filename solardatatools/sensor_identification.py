@@ -24,6 +24,41 @@ def rmse(residuals):
     return np.sqrt(np.average(np.power(residuals, 2)))
 
 
+def _score_folds(estimator, data, response, folds):
+    residuals = []
+    failed_folds = {}
+    for fold, (train_ix, test_ix) in enumerate(folds, start=1):
+        try:
+            fit = estimator.fit(data[train_ix], response[train_ix])
+            prediction = fit.predict(data[test_ix])
+        except Exception as exc:
+            failed_folds[fold] = f"{type(exc).__name__}: {exc}"
+            continue
+        with np.errstate(over="ignore", invalid="ignore"):
+            error = response[test_ix] - prediction
+        if np.isfinite(error).all():
+            residuals.append(error)
+        else:
+            failed_folds[fold] = "Nonfinite validation residuals."
+
+    coverage = {
+        "completed_folds": len(residuals),
+        "validation_samples": sum(error.size for error in residuals),
+        "failed_folds": failed_folds,
+        "reason": None,
+    }
+    if failed_folds:
+        return None, coverage
+
+    errors = np.concatenate(residuals)
+    with np.errstate(over="ignore", invalid="ignore"):
+        scores = rmse(errors), np.mean(errors)
+    if not np.isfinite(scores).all():
+        coverage["reason"] = "Nonfinite aggregate validation scores."
+        return None, coverage
+    return scores, coverage
+
+
 class SensorIdentification:
     def __init__(self, data_handler_obj):
         """
@@ -34,17 +69,25 @@ class SensorIdentification:
         :param data_handler_obj: (required) a DataHandler class instance
         """
         self.data_handler = data_handler_obj
-        self.sensor_keys = np.array(list(self.data_handler.extra_matrices.keys()))
-        if len(self.sensor_keys) == 0:
+        candidates = self.data_handler.extra_matrices
+        self._refresh_candidates(candidates)
+        if not candidates:
             print("Please add sensor columns to DataHandler pipeline.")
-            return
-        self.coverage_scores = self.data_handler.extra_quality_scores
-        nan_masks = [~np.isnan(m[1]) for m in self.data_handler.extra_matrices.items()]
-        self.compare_mask = np.all(np.array(nan_masks), axis=0)
         # These attributes are set when running the identify method
         self.results_table = None
         self.chosen_sensor = None
         self.consistent_answer = None
+        self.coverage_complete = None
+        self.validation_coverage = None
+
+    def _refresh_candidates(self, candidates):
+        self.sensor_keys = np.array(list(candidates))
+        self.coverage_scores = self.data_handler.extra_quality_scores
+        self.compare_mask = (
+            np.all([~np.isnan(matrix) for matrix in candidates.values()], axis=0)
+            if candidates
+            else None
+        )
 
     def identify(
         self,
@@ -54,74 +97,112 @@ class SensorIdentification:
         max_iter=100,
         alpha=0.0001,
     ):
+        """Rank sensors by cross-validation RMSE within each day subset.
+
+        Each eligible sensor completes the same planned folds within a subset.
+        Inspect ``validation_coverage`` for unavailable subsets and failed
+        folds, and ``coverage_complete`` for overall coverage. Incomplete
+        coverage yields ``consistent_answer=None`` unless the available subset
+        selections disagree, in which case it is ``False``.
+        """
+        self.results_table = None
+        self.chosen_sensor = None
+        self.consistent_answer = None
+        self.coverage_complete = None
+        self.validation_coverage = None
         # least squares is about 10x faster than huber, but less robust
         if model == "least-squares":
             lr = LinearRegression()
         elif model == "huber":
             lr = HuberRegressor(epsilon=epsilon, max_iter=max_iter, alpha=alpha)
-        self.results_table = None
-        self.consistent_answer = None
-        self.chosen_sensor = None
+        else:
+            raise ValueError(f"Unknown sensor identification model: {model!r}.")
+        splitter = TimeSeriesSplit(n_splits=n_splits)
+        candidates = self.data_handler.extra_matrices.copy()
+        self._refresh_candidates(candidates)
+        daily_flags = self.data_handler.daily_flags
         filters = {
-            "no_errors": self.data_handler.daily_flags.no_errors,
-            "clear": self.data_handler.daily_flags.clear,
-            "cloudy": self.data_handler.daily_flags.cloudy,
+            name: getattr(daily_flags, name, None)
+            for name in ("no_errors", "clear", "cloudy")
         }
-        results = pd.DataFrame(
-            columns=["sensor", "filter", "corr", "cv-rmse", "cv-mbe"]
-        )
-        counter = 0
-        for filter_key, filter in filters.items():
+        power = self.data_handler.filled_data_matrix
+        rows = []
+        validation_coverage = {}
+        for filter_key, days in filters.items():
+            subset_coverage = {
+                "status": "unavailable",
+                "reason": None,
+                "n_samples": None,
+                "planned_folds": 0,
+                "planned_validation_samples": 0,
+                "sensors": {},
+            }
+            validation_coverage[filter_key] = subset_coverage
+            if not candidates:
+                subset_coverage["reason"] = "No candidate sensors available."
+                continue
+            if days is None or power is None:
+                subset_coverage["reason"] = "Day flags or filled response unavailable."
+                continue
+
             mask = np.zeros_like(self.compare_mask, dtype=bool)
-            mask[:, filter] = self.compare_mask[:, filter]
+            mask[:, days] = self.compare_mask[:, days]
             # Read each day in order before splitting by sample.
             chronological_mask = mask.ravel(order="F")
-            y = self.data_handler.filled_data_matrix.ravel(order="F")[
-                chronological_mask
-            ]
-            Xs = {
-                key: matrix.ravel(order="F")[chronological_mask].reshape(-1, 1)
-                for key, matrix in self.data_handler.extra_matrices.items()
-            }
-
-            for key, data in Xs.items():
-                # Calculate correlation coefficient
-                corr = np.corrcoef(data.squeeze(), y)[0, 1]
-                # Get k-fold splits for cross validation
-                splits = TimeSeriesSplit(n_splits=n_splits).split(data)
-                residuals = []
-                # CV of linear model to predict system output from measured irradiance
-                for train_ix, test_ix in splits:
-                    try:
-                        # Fit linear regression model for each data split
-                        fit = lr.fit(data[train_ix], y[train_ix])
-                        # Get predictions for holdout set
-                        y_pred = fit.predict(data[test_ix])
-                        # Calculate the residuals
-                        residuals.append(y[test_ix] - y_pred)
-                    except:  # noqa: E722
-                        residuals.append(np.inf)
-                # Collect the residuals from all the splits
-                residuals = np.concatenate(residuals)
-                # Calculate statistics and store results
-                results.loc[counter] = (
-                    key,
-                    filter_key,
-                    corr,
-                    rmse(residuals),
-                    np.mean(residuals),
+            y = power.ravel(order="F")[chronological_mask]
+            subset_coverage["n_samples"] = y.size
+            if y.size <= splitter.n_splits:
+                subset_coverage["reason"] = (
+                    f"{y.size} common observations for {splitter.n_splits} folds. "
+                    f"At least {splitter.n_splits + 1} observations are required."
                 )
-                counter += 1
+                continue
+
+            folds = list(splitter.split(y))
+            subset_coverage["planned_folds"] = len(folds)
+            subset_coverage["planned_validation_samples"] = sum(
+                test_ix.size for _, test_ix in folds
+            )
+            eligible = 0
+            for key, matrix in candidates.items():
+                data = matrix.ravel(order="F")[chronological_mask].reshape(-1, 1)
+                scores, sensor_coverage = _score_folds(lr, data, y, folds)
+                subset_coverage["sensors"][key] = sensor_coverage
+                if scores is None:
+                    continue
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    corr = np.corrcoef(data[:, 0], y)[0, 1]
+                rows.append((key, filter_key, corr, *scores))
+                eligible += 1
+
+            if eligible == len(candidates):
+                subset_coverage["status"] = "complete"
+            elif eligible:
+                subset_coverage["status"] = "partial"
+                subset_coverage["reason"] = (
+                    "Some candidates lack valid scores across all planned folds."
+                )
+            else:
+                subset_coverage["reason"] = (
+                    "No candidates have valid scores across all planned folds."
+                )
+
+        self.validation_coverage = validation_coverage
+        self.coverage_complete = all(
+            subset["status"] == "complete" for subset in validation_coverage.values()
+        )
+        results = pd.DataFrame(
+            rows, columns=["sensor", "filter", "corr", "cv-rmse", "cv-mbe"]
+        )
         self.results_table = results
-        gb = results.groupby("filter")
-        lowest_error = gb["cv-rmse"].agg(np.argmin)
-        # All three tests (no error, clear, and cloudy) give same result
-        if len(set(lowest_error)) == 1:
-            self.chosen_sensor = self.sensor_keys[int(lowest_error.iloc[0])]
-            self.consistent_answer = True
-        else:
-            ixs = lowest_error.astype(int).values
-            sensors = self.sensor_keys[ixs]
-            self.chosen_sensor = dict(zip(lowest_error.index, sensors))
+        if results.empty:
+            return
+
+        winner_indices = results.groupby("filter")["cv-rmse"].idxmin()
+        winners = results.loc[winner_indices].set_index("filter")["sensor"].to_dict()
+        self.chosen_sensor = winners
+        if len(set(winners.values())) > 1:
             self.consistent_answer = False
-        return
+        elif self.coverage_complete:
+            self.chosen_sensor = next(iter(winners.values()))
+            self.consistent_answer = True

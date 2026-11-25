@@ -429,6 +429,34 @@ Check out this [demo](getting_started/notebooks/clearsky_detection_demo.nblink) 
 
 ## Other features
 
+### Sensor identification results
+
+`SensorIdentification.identify` uses the same chronological folds for each
+candidate sensor within the `no_errors`, `clear`, or `cloudy` subset. Each
+call rebuilds the shared observation mask from the current candidates. The
+`results_table` keeps its `sensor`, `filter`, `corr`, `cv-rmse`, and `cv-mbe`
+columns and contains a row for each candidate that completes every planned
+fold with finite `cv-rmse` and `cv-mbe`. Correlation (`corr`) is a diagnostic
+and can be undefined, for example when a sensor is constant. The lowest
+cross-validation RMSE selects the sensor for the subset, including when only
+one candidate qualifies.
+
+Check `coverage_complete` to determine whether every candidate could be
+scored in all three subsets. Each subset in `validation_coverage` reports
+its `status` (`complete`, `partial`, or `unavailable`), `reason`, common
+sample count (`n_samples`), `planned_folds`, and `planned_validation_samples`.
+Its `sensors` mapping reports `completed_folds`, the `validation_samples`
+they covered, and `failed_folds` with reasons keyed by one-based fold number.
+The sensor's `reason` describes any failure to compute a finite aggregate
+score from completed folds. A subset with too few samples has zero planned folds.
+
+With complete coverage and agreement across all three subsets,
+`chosen_sensor` is a single sensor key and `consistent_answer` is `True`.
+Otherwise, `chosen_sensor` maps usable subsets to their selections, or is
+`None` when no subset has a selection. `consistent_answer` is `False` when
+any two available selections disagree. It is `None` when coverage is
+incomplete and the available selections agree or no selection is available.
+
 ### Orientation and Location estimation
 The DataHandler also includes methods to estimate the position of the solar panels based on the data.
 This includes the location (latitude and longitude) and orientation (tilt and azimuth) of the system.

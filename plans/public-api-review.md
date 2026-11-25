@@ -4,7 +4,7 @@
 - Review register: public tool
 - Reviewed revision: `e1cd896e6bd86f2fb12bd4c588af4f3a64103e92` (`main` at review time)
 - Branch when this plan was recorded: `cleanup`, at the same revision
-- Last revised: 2026-11-24, SENSOR-01 implementation and verification
+- Last revised: 2026-11-24, SENSOR-02 implementation and verification
 - Status: working document. Implementation requires issue-specific authorization.
 
 ## Purpose and authorization
@@ -95,6 +95,10 @@ SD-07 and its SD-01 cross-reference. Neither is deferred by this section, and
 their recorded verification requirements remain unchanged.
 
 ### Latest completion status (2026-11-24)
+
+SENSOR-01 is complete on `cleanup` in `723debd`. The committed diff and
+new regression test match the independently reviewed hashes. The review
+found no issues and recorded 172 tests passed and two skipped. See Section 9.
 
 QUALITY-01 and QUALITY-03 are complete on `cleanup` in `856dbb9`.
 The dataset quality score now returns the fraction of all day columns
@@ -1031,7 +1035,8 @@ the other physical-time conversions; no duplicate correction is intended here.
 
 #### SENSOR-01 — Temporal validation receives time-of-day-major ordering [P2]
 
-- **Status, 2026-11-24:** implemented and verified locally on `cleanup`.
+- **Status, 2026-11-24:** complete on `cleanup` in `723debd` after
+  independent review. See Section 9.
 - **Location:** `SensorIdentification.__init__` and `SensorIdentification.identify`.
 - **Finding:** two-dimensional Boolean indexing traversed the daily matrix
   in row-major order. All dates at one time of day preceded the next time
@@ -1050,34 +1055,40 @@ the other physical-time conversions; no duplicate correction is intended here.
 
 #### SENSOR-02 — Unavailable subsets and failed folds break sensor identification [P2]
 
-- **Location:** `SensorIdentification.identify`, approximately lines 74–125.
-- **Finding:** the method always evaluates `no_errors`, `clear`, and `cloudy`
-  subsets. Empty or undersized subsets fail when the split iterator advances,
-  outside the fit exception handler. A failed fit appends scalar `np.inf` to a
-  list subsequently passed to `np.concatenate`, causing another failure instead
-  of producing a usable failed-fold result.
+- **Status, 2026-11-24:** implemented in the working tree for review.
+- **Location:** `SensorIdentification.identify`.
+- **Finding:** empty or undersized `no_errors`, `clear`, and `cloudy`
+  subsets failed when the split iterator advanced. A failed fit appended
+  scalar `np.inf` to the residual array list, which caused concatenation to fail.
 - **Owner decision, 2026-10-22:** return rankings for usable subsets when another
   subset has insufficient data, and explicitly flag incomplete coverage.
   An unavailable clear or cloudy comparison does not invalidate the other
   successfully evaluated subset results.
-- **Proposed correction:** validate subset/split feasibility before fitting and
-  represent unavailable subsets and failed folds explicitly. Return each usable
-  subset's ranking with coverage information and reasons for unavailable
-  comparisons. Do not silently rank NaNs or substitute an unavailable subset's
-  result with another subset's winner. `consistent_answer` must not report
-  agreement across all three conditions when any comparison is unavailable.
-  Preserve any observed disagreement among the tested subsets while separately
-  reporting incomplete coverage; missing evidence is not itself disagreement.
-  Document the resulting selection/consistency contract and any changed return
-  representation in the migration guide. Failed fits are not usable validation
-  results; retain enough fold and observation coverage information to ensure
-  that scores entering a ranking refer to comparable validation populations.
-- **Proposed verification:** all-clear and all-cloudy records, too few retained
-  observations, and forced fit/prediction failures. Verify that usable rankings
-  remain available, unavailable comparisons are identified, and incomplete
-  coverage never produces an all-conditions agreement claim. Include both
-  agreement and disagreement among available subsets and no usable subsets.
-  Check these semantics alongside the chronological partitions in SENSOR-01.
+- **Owner decision, 2026-11-24:** keep the planned validation folds and their
+  held-out observations fixed for each subset. A sensor must complete every
+  planned fold to qualify for that subset's ranking. Record failed folds
+  and their reasons. Select a sole eligible sensor and flag incomplete
+  coverage when another candidate is excluded. If no sensor qualifies, mark
+  the subset unavailable. Set `consistent_answer` to `True` only when
+  coverage is complete and all three selections agree. Use `False` for
+  disagreement among available selections and `None` for incomplete coverage
+  without observed disagreement.
+- **Implementation:** refresh the candidate list and common observation mask
+  on each call. Check split feasibility before fitting and generate one
+  chronological fold schedule per usable subset. `results_table` retains its
+  column names and contains scores for eligible sensor/subset pairs.
+  `validation_coverage` reports subset availability, planned and completed
+  coverage, and failure reasons. `coverage_complete` summarizes coverage
+  across all subsets and candidates. `chosen_sensor` is a single key for
+  complete agreement, a mapping of available subset selections otherwise,
+  or `None` when no subset has a selection. The user guide documents
+  the result attributes and migration behavior.
+- **Verification:** synthetic regressions cover all-clear and all-cloudy
+  records, too few common observations, failures in fitting and prediction,
+  nonfinite predictions, sole eligibility, agreement and disagreement with
+  incomplete coverage, and reruns after a sensor is added or no subset remains
+  usable. The SENSOR-01 regression checks exact chronological partitions at
+  the estimator calls.
 
 ## 2. Signal-decomposition implementations and dispatch
 
@@ -3956,8 +3967,8 @@ The missing `boto3` installation dependency is tracked under PKG-02.
   validation with the supported Python and dependency combinations.
 - **Revised disposition:** `np.concat` is valid in the selected NumPy major
   version and no longer constitutes a compatibility defect. Replacing it with
-  `np.concatenate` is not required by this issue. The local SENSOR-01
-  checkpoint includes the sensor constructor's `np.alltrue` replacement.
+  `np.concatenate` is not required by this issue. The sensor constructor's
+  `np.alltrue` replacement was committed with SENSOR-01 in `723debd`.
   Calls to the remaining removed APIs still require correction.
 - **Proposed correction:** use `np.all` and `float`; narrow KML exception handling
   and report when no usable polygons remain. Declare the validated NumPy 2.x
@@ -6274,8 +6285,12 @@ register.
   The full suite for the revised checkpoint passed with 171 tests and two
   skips in the same environment.
 
-### 2026-11-24 — SENSOR-01 implementation and verification
+### 2026-11-24 — SENSOR-01 completion
 
+- **Completion:** the owner committed SENSOR-01 in `723debd` on `cleanup`.
+  The committed diff for the two modified files and the added test file
+  match their respective independent-review hashes. The working tree was
+  clean before this completion update.
 - **Scope:** chronological sample-level validation, with fold boundaries
   allowed within a day. The owner authorized the constructor's `np.alltrue`
   replacement because NumPy 2.4.2 blocks construction before validation.
@@ -6285,6 +6300,27 @@ register.
   January 5 at 00:00 and validated from January 2 at 06:00. The corrected
   traversal passed all 12 partition checks and the checks for shared sample
   coverage and predictor/response alignment.
-- **Verification:** 172 tests passed and two skipped with Python 3.13.11,
-  NumPy 2.4.2, scikit-learn 1.8.0, and CVXPY 1.8.1. Ruff lint and format
-  checks passed for both changed Python files.
+- **Verification:** the builder and independent reviewer each reported
+  172 tests passed and two skipped. The builder used Python 3.13.11,
+  NumPy 2.4.2, scikit-learn 1.8.0, and CVXPY 1.8.1. Ruff lint, Ruff
+  format, and `git diff --check` passed. The reviewer found no issues.
+
+### 2026-11-24 — SENSOR-02 implementation and verification
+
+- **Owner decision:** require each eligible sensor to complete every
+  planned fold for its subset. Select a sole eligible sensor and flag
+  incomplete coverage. Agreement among available selections is undetermined
+  when coverage is incomplete. Report observed disagreement separately.
+- **Implementation:** keep each subset's validation timestamps fixed and
+  retain complete scores from eligible candidates. Report insufficient sample
+  counts, successful fold and observation counts, and fold failure reasons.
+  Document the selection and coverage attributes in the user guide.
+- **First-pass review:** adding a candidate with two missing readings left
+  the original identifier's common sample count at 24. The regression now
+  checks that a rerun uses the same 22 common samples, rankings, and coverage
+  as a fresh identifier. The user guide identifies the finite validation
+  metrics required for eligibility and explains undefined correlation.
+- **Verification:** all ten sensor identification tests passed. The full
+  suite passed with 181 tests and two skips on Python 3.13.11, NumPy 2.4.2,
+  scikit-learn 1.8.0, and CVXPY 1.8.1. Ruff lint, Ruff format, and
+  `git diff --check` passed.
